@@ -1,0 +1,10 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+backups/
+invoice_images/
+__pycache__/
+*.pyc
+venv/
+.venv/
