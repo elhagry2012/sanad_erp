@@ -332,10 +332,14 @@ def query(sql: str, params: tuple = ()) -> pd.DataFrame:
     finally:
         conn.close()
 def init_db():
-    conn = get_connection()
+    import sqlite3
+    import os
+    
+    DB_PATH = "database/sanad.db"
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     
-    # فحص وإضافة أي أعمدة ناقصة تلقائياً لتفادي أي أخطاء OperationalError
     def add_column_if_not_exists(table_name, column_name, column_definition):
         try:
             cursor.execute(f"PRAGMA table_info({table_name})")
@@ -346,7 +350,7 @@ def init_db():
         except Exception as e:
             print(f"Note on {table_name}.{column_name}: {e}")
 
-    # تفعيل الفحص على جدول فواتير المشتريات والحركات
+    # فحص وإضافة الأعمدة الناقصة تلقائياً
     add_column_if_not_exists("purchase_invoices", "total", "REAL")
     add_column_if_not_exists("purchase_invoices", "subtotal", "REAL")
     add_column_if_not_exists("purchase_invoices", "vat_rate", "REAL")
