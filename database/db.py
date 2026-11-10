@@ -331,3 +331,35 @@ def query(sql: str, params: tuple = ()) -> pd.DataFrame:
         return pd.read_sql_query(sql, conn, params=params)
     finally:
         conn.close()
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # فحص وإضافة أي أعمدة ناقصة تلقائياً لتفادي أي أخطاء OperationalError
+    def add_column_if_not_exists(table_name, column_name, column_definition):
+        try:
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = [col[1] for col in cursor.fetchall()]
+            if columns and column_name not in columns:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                conn.commit()
+        except Exception as e:
+            print(f"Note on {table_name}.{column_name}: {e}")
+
+    # تفعيل الفحص على جدول فواتير المشتريات والحركات
+    add_column_if_not_exists("purchase_invoices", "total", "REAL")
+    add_column_if_not_exists("purchase_invoices", "subtotal", "REAL")
+    add_column_if_not_exists("purchase_invoices", "vat_rate", "REAL")
+    add_column_if_not_exists("purchase_invoices", "vat", "REAL")
+    add_column_if_not_exists("purchase_invoices", "wht_rate", "REAL")
+    add_column_if_not_exists("purchase_invoices", "saved_image", "TEXT")
+    add_column_if_not_exists("purchase_invoices", "wh", "TEXT")
+    add_column_if_not_exists("purchase_invoices", "pay_method", "TEXT")
+    add_column_if_not_exists("purchase_invoices", "created_by", "TEXT")
+    add_column_if_not_exists("purchase_invoices", "replaces_id", "INTEGER")
+    add_column_if_not_exists("stock_movements", "lots", "TEXT")
+    add_column_if_not_exists("production_batches", "is_voided", "INTEGER DEFAULT 0")
+    add_column_if_not_exists("transfer_vouchers", "is_voided", "INTEGER DEFAULT 0")
+    add_column_if_not_exists("transfer_vouchers", "void_reason", "TEXT")
+    
+    conn.close()
