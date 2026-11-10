@@ -2,6 +2,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 from database.db import query
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, reports, inventory
 from utils.costing import price_variance, price_impact
 
@@ -33,7 +34,9 @@ def render():
                 st.info("لا توجد أرصدة في هذا المخزن.")
             else:
                 st.metric(f"قيمة مخزون «{pick}»", f"{df['القيمة'].sum():,.2f}")
-                st.dataframe(df.round(3), use_container_width=True, hide_index=True)
+                _tbl7 = df
+                st.dataframe(_tbl7.round(3), use_container_width=True, hide_index=True)
+                export_buttons(_tbl7, f"أرصدة مخزن {pick}", "stock_wh", subtitle=f"{auth.client_name()} — {pick}", formats={"الرصيد": FMT_QTY, "تكلفة الوحدة": FMT_COST, "القيمة": FMT_MONEY}, totals=["القيمة"], key="inv_wh")
         else:
             df = query("""SELECT id, name AS "الصنف", CASE is_semi WHEN 1 THEN 'نصف مصنع' ELSE 'خامة' END AS "النوع", unit AS "وحدة الاستهلاك",
                           qty_on_hand AS "الرصيد", avg_cost AS "متوسط التكلفة (للوحدة)",
@@ -52,7 +55,9 @@ def render():
                 low = df[(df["حد الطلب"] > 0) & (df["الرصيد"] <= df["حد الطلب"]) & (df["الرصيد"] >= 0)]
                 if not low.empty:
                     st.warning("وصلت لحد إعادة الطلب: " + "، ".join(low["الصنف"]))
-                st.dataframe(df.drop(columns="id").round(3), use_container_width=True, hide_index=True)
+                _tbl6 = df.drop(columns="id")
+                st.dataframe(_tbl6.round(3), use_container_width=True, hide_index=True)
+                export_buttons(_tbl6, "الجرد المجمّع للمخزون (كل المخازن)", "inventory_consolidated", subtitle=f"{auth.client_name()} — كل المخازن", formats={"الرصيد": FMT_QTY, "متوسط التكلفة (للوحدة)": FMT_COST, "القيمة": FMT_MONEY, "آخر سعر": FMT_COST, "حد الطلب": FMT_QTY}, totals=["القيمة"], key="inv_all")
 
     with t2:
         pv = price_variance(cid)
@@ -60,13 +65,17 @@ def render():
             st.info("يلزم فاتورتا شراء على الأقل لنفس الخامة.")
         else:
             st.subheader("تغير آخر سعر شراء عن السابق (لكل وحدة استهلاك)")
-            st.dataframe(pv, use_container_width=True, hide_index=True)
+            _tbl5 = pv
+            st.dataframe(_tbl5, use_container_width=True, hide_index=True)
+            export_buttons(_tbl5, "انحراف أسعار الخامات", "price_variance", formats={"السعر السابق": FMT_COST, "السعر الحالي": FMT_COST, "التغير %": "0.0"}, key="inv_pv")
             st.subheader("أثر التغير على تكلفة الوجبة الواحدة")
             imp = price_impact(cid)
             if imp.empty:
                 st.caption("لا توجد وجبات تستخدم الخامات المتغيرة.")
             else:
-                st.dataframe(imp, use_container_width=True, hide_index=True)
+                _tbl4 = imp
+                st.dataframe(_tbl4, use_container_width=True, hide_index=True)
+                export_buttons(_tbl4, "أثر تغير الأسعار على تكلفة الوجبات", "price_impact", formats={"أثر التغير على تكلفة الوجبة": FMT_MONEY, "التغير %": "0.0"}, key="inv_pi")
 
     with t3:
         allitems = query("SELECT id, name FROM items WHERE client_id=? ORDER BY is_semi, name", (cid,))
@@ -89,9 +98,9 @@ def render():
             if card.empty:
                 st.info("لا توجد حركات في هذه الفترة.")
             else:
-                st.dataframe(card.round(4), use_container_width=True, hide_index=True)
-                st.download_button("تنزيل الكارت CSV", card.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"card_{item['name']}.csv", mime="text/csv")
+                _tbl3 = card
+                st.dataframe(_tbl3.round(4), use_container_width=True, hide_index=True)
+                export_buttons(_tbl3, f"كارت صنف: {item['name']} ({item['unit']})", "item_card", subtitle=f"{auth.client_name()} — {pick} — من {f} إلى {t} — رصيد أول الفترة {opening:,.3f}", formats={"وارد": FMT_QTY, "صادر": FMT_QTY, "الرصيد": FMT_QTY, "تكلفة الوحدة": FMT_COST, "قيمة الحركة": FMT_MONEY}, totals=["وارد", "صادر", "قيمة الحركة"], key="inv_card")
 
     with t4:
         a, b, c = st.columns(3)
@@ -106,7 +115,9 @@ def render():
         mv["نوع الحركة"] = mv["t"].map(reports.MOVE_AR)
         if pick_i:
             mv = mv[mv["الصنف"].isin(pick_i)]
-        st.dataframe(mv.drop(columns="t").round(4), use_container_width=True, hide_index=True)
+        _tbl2 = mv.drop(columns="t")
+        st.dataframe(_tbl2.round(4), use_container_width=True, hide_index=True)
+        export_buttons(_tbl2, "حركة المخزن", "stock_movements", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "تكلفة الوحدة": FMT_COST, "القيمة": FMT_MONEY}, key="inv_mv")
 
     with t5:
         st.caption("الجرد لمخزن واحد في كل مرة. عند الاعتماد تُسوّى أرصدة هذا المخزن فقط بحركة «تسوية جرد» مسجلة باسمك.")
@@ -122,6 +133,20 @@ def render():
             grid["الكمية الفعلية"] = grid["رصيد النظام"]
             ed = st.data_editor(grid, hide_index=True, use_container_width=True, key=f"count_grid_{wid}",
                                 disabled=["id", "الصنف", "الوحدة", "رصيد النظام"], column_config={"id": None})
+            sheet = grid[["الصنف", "الوحدة", "رصيد النظام"]].assign(**{"الكمية الفعلية": None, "ملاحظات": None})
+            st.caption("للجرد الورقي: صدّر ورقة الجرد، اطبعها، سجّل الكميات الفعلية، ثم أدخلها هنا.")
+            export_buttons(sheet, f"ورقة جرد - {pick}", "count_sheet", subtitle=f"{auth.client_name()} — {pick} — {day}", formats={"رصيد النظام": FMT_QTY}, key="cnt_sheet")
+            with st.expander("📅 الدفعات وتواريخ الصلاحية في هذا المخزن (للمطابقة أثناء الجرد)"):
+                lt = reports.lots_df(cid, wid)
+                if lt.empty:
+                    st.caption("لا توجد دفعات ذات تاريخ صلاحية في هذا المخزن.")
+                else:
+                    st.dataframe(lt.round(3), use_container_width=True, hide_index=True)
+                    gone = lt[(lt["أيام للانتهاء"].notna()) & (lt["أيام للانتهاء"] < 0)]
+                    if not gone.empty:
+                        st.error("⚠️ دفعات منتهية الصلاحية ما زالت بالمخزن: " + "، ".join(gone["الصنف"]) + " — سجّلها من «الهدر والتالف».")
+                    export_buttons(lt, f"الدفعات وتواريخ الصلاحية - {pick}", "lots_report", subtitle=f"{auth.client_name()} — {pick}",
+                                   formats={"الرصيد": FMT_QTY, "تكلفة الوحدة": FMT_COST}, key="lots_exp")
             apply_adj = st.checkbox("اعتماد التسوية وتعديل أرصدة هذا المخزن حسب الجرد")
             if st.button("حفظ الجرد"):
                 counts = {int(r["id"]): float(r["الكمية الفعلية"]) for _, r in ed.iterrows()}
@@ -132,6 +157,22 @@ def render():
                     bad = ed[ed["الفرق"].abs() > 1e-9][["الصنف", "رصيد النظام", "الكمية الفعلية", "الفرق"]]
                     if not bad.empty:
                         st.warning("فروق بين المخزون النظري والفعلي:")
-                        st.dataframe(bad, use_container_width=True, hide_index=True)
+                        _tbl1 = bad
+                        st.dataframe(_tbl1, use_container_width=True, hide_index=True)
+                        export_buttons(_tbl1, f"فروق الجرد - {pick}", "stocktake_variance", subtitle=f"{auth.client_name()} — {pick} — {day}", formats={"رصيد النظام": FMT_QTY, "الكمية الفعلية": FMT_QTY, "الفرق": FMT_QTY}, key="inv_var")
                 except ValueError as e:
                     st.error(str(e))
+
+        st.subheader("سجل عمليات الجرد")
+        hist = reports.stocktake_history(cid)
+        if hist.empty:
+            st.caption("لا توجد عمليات جرد محفوظة.")
+        else:
+            labels = [f"#{r['id']} — {r['count_date']} — {r['warehouse']} ({r['diff_count']} فرق من {r['lines_count']})" for _, r in hist.iterrows()]
+            pick_h = st.selectbox("اختر جردًا", labels, key="hist_pick")
+            hid = int(hist.iloc[labels.index(pick_h)]["id"])
+            hl = reports.stocktake_lines(hid)
+            st.dataframe(hl.round(3), use_container_width=True, hide_index=True)
+            export_buttons(hl, "تقرير الجرد", "stocktake_report", subtitle=f"{auth.client_name()} — {pick_h}",
+                           formats={"رصيد النظام": FMT_QTY, "الكمية الفعلية": FMT_QTY, "الفرق": FMT_QTY, "قيمة الفرق": FMT_MONEY},
+                           totals=["قيمة الفرق"], key="hist_exp", note="قيمة الفرق بتكلفة الوحدة الحالية (تقريبية).")

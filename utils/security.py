@@ -36,7 +36,29 @@ MODULES = {
     "waste": "الهدر والتالف",
     "menu": "هندسة القائمة",
     "clients": "العملاء (المطاعم)",
+    "import": "الاستيراد الجماعي للبيانات",
+    "reports": "مركز التقارير (الدخول للصفحة)",
+    "rep_financial": "تقارير: مالية",
+    "rep_tax": "تقارير: ضريبية وإقفال",
+    "rep_inventory": "تقارير: مخزون وصلاحية وركود",
+    "rep_management": "تقارير: إدارية وتحليلية",
 }
+_T, _F = True, False
+# أدوار جاهزة: تُطبَّق كنقطة بداية ويمكن للمدير العام تعديلها لكل مستخدم. (عرض، تعديل)
+ROLE_PRESETS = {
+    "cashier": {"label": "كاشير", "modules": {"sales": (_T, _T), "waste": (_T, _T)}},
+    "restaurant_manager": {"label": "مدير مطعم", "modules": {
+        "dashboard": (_T, _F), "purchases": (_T, _T), "inventory": (_T, _T), "warehouses": (_T, _T), "production": (_T, _T),
+        "sales": (_T, _T), "expenses": (_T, _T), "waste": (_T, _T), "menu": (_T, _F), "reports": (_T, _F),
+        "rep_inventory": (_T, _F), "rep_management": (_T, _F)}},
+    "finance_manager": {"label": "مدير مالي", "modules": {
+        "dashboard": (_T, _F), "treasury": (_T, _T), "expenses": (_T, _T), "purchases": (_T, _T), "sales": (_T, _F),
+        "inventory": (_T, _F), "menu": (_T, _F), "reports": (_T, _T), "rep_financial": (_T, _T), "rep_tax": (_T, _T),
+        "rep_inventory": (_T, _F)}},
+    "general_manager": {"label": "مدير عام (غير Admin)", "all": True, "modules": {}},
+}
+# وحدات حساسة: لا تشملها خاصية «كل الوحدات»؛ تُمنح بالاسم فقط (المدير العام يملكها دائمًا)
+SENSITIVE_MODULES = {"import"}
 
 
 class PermissionDenied(ValueError):
@@ -259,32 +281,42 @@ def get_access(username: str) -> dict | None:
     r = df.iloc[0]
     uid = int(r["id"])
     if r["role"] == "admin" and username == ADMIN_USERNAME:
-        return {"admin": True, "active": bool(r["is_active"]), "all_modules": True, "modules": {},
+        return {"admin": True, "active": bool(r["is_active"]), "all_modules": True, "modules": {}, "explicit": {},
                 "all_clients": True, "clients": set()}
     all_m = True if pd.isna(r["all_modules"]) else bool(r["all_modules"])
     all_c = True if pd.isna(r["all_clients"]) else bool(r["all_clients"])
-    mods, clients = {}, set()
-    if not all_m:
-        for _, p in query("SELECT module, can_view, can_edit FROM user_permissions WHERE user_id=?", (uid,)).iterrows():
-            mods[p["module"]] = (bool(p["can_view"]) or bool(p["can_edit"]), bool(p["can_edit"]))
+    explicit, clients = {}, set()
+    for _, p in query("SELECT module, can_view, can_edit FROM user_permissions WHERE user_id=?", (uid,)).iterrows():
+        explicit[p["module"]] = (bool(p["can_view"]) or bool(p["can_edit"]), bool(p["can_edit"]))
     if not all_c:
         clients = {int(x) for x in query("SELECT client_id FROM user_clients WHERE user_id=?", (uid,))["client_id"]}
-    return {"admin": False, "active": bool(r["is_active"]), "all_modules": all_m, "modules": mods,
-            "all_clients": all_c, "clients": clients}
+    return {"admin": False, "active": bool(r["is_active"]), "all_modules": all_m, "modules": {} if all_m else explicit,
+            "explicit": explicit, "all_clients": all_c, "clients": clients}
+
+
+def module_access(a: dict, module: str) -> tuple[bool, bool]:
+    """(عرض، تعديل) لوحدة معيّنة مع مراعاة الوحدات الحساسة."""
+    if a["admin"]:
+        return True, True
+    if module in SENSITIVE_MODULES:
+        return a["explicit"].get(module, (False, False))
+    if a["all_modules"]:
+        return True, True
+    return a["modules"].get(module, (False, False))
 
 
 def can_view(username: str, module: str) -> bool:
     a = get_access(username)
     if not a or not a["active"]:
         return False
-    return a["admin"] or a["all_modules"] or a["modules"].get(module, (False, False))[0]
+    return module_access(a, module)[0]
 
 
 def can_edit(username: str, module: str) -> bool:
     a = get_access(username)
     if not a or not a["active"]:
         return False
-    return a["admin"] or a["all_modules"] or a["modules"].get(module, (False, False))[1]
+    return module_access(a, module)[1]
 
 
 def allowed_client_ids(username: str):
@@ -309,11 +341,10 @@ def require(user: str, module: str, cid=None, edit: bool = True) -> None:
         _denied(user, module, cid, "المستخدم غير معروف أو معطّل.")
     if a["admin"]:
         return
-    if not a["all_modules"]:
-        v, e = a["modules"].get(module, (False, False))
-        if (edit and not e) or (not edit and not v):
-            _denied(user, module, cid, "ليس لديك صلاحية " + ("التعديل" if edit else "الدخول") +
-                    f" في وحدة «{MODULES.get(module, module)}».")
+    v, e = module_access(a, module)
+    if (edit and not e) or (not edit and not v):
+        _denied(user, module, cid, "ليس لديك صلاحية " + ("التعديل" if edit else "الدخول") +
+                f" في وحدة «{MODULES.get(module, module)}».")
     if cid is not None and not a["all_clients"] and int(cid) not in a["clients"]:
         _denied(user, module, cid, "ليس لديك صلاحية على هذا المطعم.")
 
@@ -350,22 +381,43 @@ def _require_admin(by: str) -> None:
 
 
 # ================================================================= إدارة الحسابات (المدير العام فقط)
-def _apply_access(c, uid, all_modules, modules, all_clients, client_ids):
-    c.execute("UPDATE users SET all_modules=?, all_clients=? WHERE id=?", (1 if all_modules else 0, 1 if all_clients else 0, uid))
+def _apply_modules(c, uid, all_modules, modules):
+    c.execute("UPDATE users SET all_modules=? WHERE id=?", (1 if all_modules else 0, uid))
     c.execute("DELETE FROM user_permissions WHERE user_id=?", (uid,))
+    for m, (v, e) in (modules or {}).items():
+        if m in MODULES and (not all_modules or m in SENSITIVE_MODULES):
+            c.execute("INSERT INTO user_permissions(user_id,module,can_view,can_edit) VALUES(?,?,?,?)",
+                      (uid, m, 1 if (v or e) else 0, 1 if e else 0))
+
+
+def _apply_access(c, uid, all_modules, modules, all_clients, client_ids):
+    _apply_modules(c, uid, all_modules, modules)
+    c.execute("UPDATE users SET all_clients=? WHERE id=?", (1 if all_clients else 0, uid))
     c.execute("DELETE FROM user_clients WHERE user_id=?", (uid,))
-    if not all_modules:
-        for m, (v, e) in (modules or {}).items():
-            if m in MODULES:
-                c.execute("INSERT INTO user_permissions(user_id,module,can_view,can_edit) VALUES(?,?,?,?)",
-                          (uid, m, 1 if (v or e) else 0, 1 if e else 0))
     if not all_clients:
         for cid in (client_ids or []):
             c.execute("INSERT OR IGNORE INTO user_clients(user_id,client_id) VALUES(?,?)", (uid, int(cid)))
 
 
+def apply_role(username: str, role_key: str, by: str) -> None:
+    """يطبّق دورًا جاهزًا (كاشير/مدير مطعم/مدير مالي/مدير عام) على صلاحيات الوحدات. المطاعم المسموحة لا تتغير."""
+    _require_admin(by)
+    if username == ADMIN_USERNAME:
+        raise ValueError("المدير العام لا يُغيَّر دوره.")
+    if role_key not in ROLE_PRESETS:
+        raise ValueError("دور غير معروف.")
+    preset = ROLE_PRESETS[role_key]
+    with tx() as c:
+        row = c.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        if not row:
+            raise ValueError("المستخدم غير موجود.")
+        _apply_modules(c, row[0], bool(preset.get("all")), preset["modules"])
+        c.execute("UPDATE users SET job_role=? WHERE id=?", (role_key, row[0]))
+        log(c, by, "update", "permission", row[0], f"{username}: تطبيق دور «{preset['label']}»")
+
+
 def create_user(username: str, full_name: str, password: str, by: str, all_modules=True, modules=None,
-                all_clients=True, client_ids=None) -> None:
+                all_clients=True, client_ids=None, role: str | None = None) -> None:
     _require_admin(by)
     u = (username or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9_.]{3,30}", u):
@@ -381,8 +433,13 @@ def create_user(username: str, full_name: str, password: str, by: str, all_modul
         uid = c.execute("INSERT INTO users(username,full_name,password_hash,role,is_active,created_by,must_change_password,"
                         "password_changed_at) VALUES(?,?,?,'partner',1,?,1,?)",
                         (u, (full_name or "").strip(), hash_password(password), by, _now())).lastrowid
+        if role:
+            if role not in ROLE_PRESETS:
+                raise ValueError("دور غير معروف.")
+            all_modules, modules = bool(ROLE_PRESETS[role].get("all")), ROLE_PRESETS[role]["modules"]
+            c.execute("UPDATE users SET job_role=? WHERE id=?", (role, uid))
         _apply_access(c, uid, all_modules, modules, all_clients, client_ids)
-        log(c, by, "create", "user", uid, f"إنشاء حساب {u}")
+        log(c, by, "create", "user", uid, f"إنشاء حساب {u}" + (f" بدور {ROLE_PRESETS[role]['label']}" if role else ""))
 
 
 def set_permissions(username: str, by: str, all_modules: bool, modules: dict, all_clients: bool, client_ids) -> None:
@@ -401,7 +458,7 @@ def set_permissions(username: str, by: str, all_modules: bool, modules: dict, al
 
 
 def list_users() -> pd.DataFrame:
-    return query("""SELECT id, username, full_name, role, is_active, COALESCE(all_modules,1) all_modules,
+    return query("""SELECT id, username, full_name, role, job_role, is_active, COALESCE(all_modules,1) all_modules,
                     COALESCE(all_clients,1) all_clients, COALESCE(must_change_password,0) must_change_password,
                     password_changed_at, last_login_at, created_at, created_by FROM users ORDER BY id""")
 

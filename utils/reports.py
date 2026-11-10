@@ -6,6 +6,7 @@ import pandas as pd
 
 from database.db import query, IMAGES_DIR
 from utils import treasury
+from utils.ledger import SUPPLIER_BALANCE
 from utils.costing import dish_costs
 from utils.inventory import unit_cost, DECIMALS
 
@@ -24,11 +25,7 @@ def client_summary(cid, start) -> dict:
     waste = _f(query("SELECT SUM(cost) v FROM waste_log WHERE client_id=? AND waste_date>=?", (cid, str(start)))["v"].iloc[0])
     stock = _f(query("""SELECT SUM(qty_on_hand * CASE WHEN avg_cost>0 THEN avg_cost ELSE COALESCE(last_price,0) END) v
                         FROM items WHERE client_id=?""", (cid,))["v"].iloc[0])
-    payable = _f(query("""SELECT SUM(b) v FROM (SELECT s.opening_balance
-        + COALESCE((SELECT SUM(total - COALESCE(wht_amount,0)) FROM purchase_invoices WHERE supplier_id=s.id),0)
-        - COALESCE((SELECT SUM(paid) FROM purchase_invoices WHERE supplier_id=s.id),0)
-        - COALESCE((SELECT SUM(amount) FROM supplier_payments WHERE supplier_id=s.id),0) AS b
-        FROM suppliers s WHERE s.client_id=?)""", (cid,))["v"].iloc[0])
+    payable = _f(query(f"""SELECT SUM(b) v FROM (SELECT {SUPPLIER_BALANCE} AS b FROM suppliers s WHERE s.client_id=?)""", (cid,))["v"].iloc[0])
     gross = revenue - cogs
     bal = treasury.balances(cid)
     return {"revenue": revenue, "cogs": cogs, "gross": gross, "opex": opex, "waste": waste,
@@ -71,8 +68,10 @@ def supplier_statement(cid, supplier_id, start, end):
         return None, pd.DataFrame(), 0.0, 0.0
     sup = sup.iloc[0]
     inv = query("""SELECT id, invoice_date AS d, invoice_no, total - COALESCE(wht_amount,0) AS net, paid, COALESCE(wht_amount,0) AS wht
-                   FROM purchase_invoices WHERE supplier_id=? AND client_id=?""", (supplier_id, cid))
+                   FROM purchase_invoices WHERE supplier_id=? AND client_id=? AND COALESCE(status,'active')='active'""", (supplier_id, cid))
     pay = query("SELECT id, pay_date AS d, amount, note FROM supplier_payments WHERE supplier_id=? AND client_id=?", (supplier_id, cid))
+    rets = query("""SELECT id, return_date AS d, net_credit, refund_amount, reason FROM purchase_returns
+                    WHERE supplier_id=? AND client_id=? AND status='active'""", (supplier_id, cid))
     recs = []
     for _, r in inv.iterrows():
         ref = r["invoice_no"] or str(r["id"])
@@ -82,6 +81,10 @@ def supplier_statement(cid, supplier_id, start, end):
             recs.append((r["d"], 1, r["id"], "دفعة عند استلام الفاتورة", ref, 0.0, float(r["paid"])))
     for _, r in pay.iterrows():
         recs.append((r["d"], 2, r["id"], "دفعة" + (f" - {r['note']}" if r["note"] else ""), f"دفعة {r['id']}", 0.0, float(r["amount"])))
+    for _, r in rets.iterrows():
+        recs.append((r["d"], 3, r["id"], f"مرتجع مشتريات - {r['reason']} (إشعار دائن)", f"مرتجع {r['id']}", 0.0, float(r["net_credit"])))
+        if r["refund_amount"] and r["refund_amount"] > 0:
+            recs.append((r["d"], 4, r["id"], "استرداد نقدي/بنكي من المورد", f"مرتجع {r['id']}", float(r["refund_amount"]), 0.0))
     df = pd.DataFrame(recs, columns=["d", "o", "id", "desc", "ref", "credit", "debit"]).sort_values(["d", "o", "id"])
     start, end = str(start), str(end)
     before = df[df["d"] < start]
@@ -97,7 +100,8 @@ def supplier_statement(cid, supplier_id, start, end):
 
 # ---------------------------------------------------------------- كارت الصنف
 MOVE_AR = {"purchase": "شراء", "production_in": "دخول إنتاج", "production_out": "صرف للإنتاج", "sale": "بيع",
-           "waste": "هدر", "adjustment": "تسوية جرد", "transfer_in": "تحويل وارد", "transfer_out": "تحويل صادر"}
+           "waste": "هدر", "adjustment": "تسوية جرد", "transfer_in": "تحويل وارد", "transfer_out": "تحويل صادر",
+           "opening": "رصيد افتتاحي"}
 
 
 def _doc_label(row, inv_map):
@@ -106,7 +110,8 @@ def _doc_label(row, inv_map):
         no, sup = inv_map.get(int(ref) if pd.notna(ref) else -1, ("", ""))
         return f"فاتورة شراء {no or int(ref)}" + (f" - {sup}" if sup else "")
     base = {"production_in": "تشغيلة إنتاج", "production_out": "تشغيلة إنتاج", "sale": "مبيعات كاشير", "waste": "هدر",
-            "adjustment": "جرد وتسوية", "transfer_in": "إذن تحويل", "transfer_out": "إذن تحويل"}.get(t, t)
+            "adjustment": "جرد وتسوية", "transfer_in": "إذن تحويل", "transfer_out": "إذن تحويل",
+            "opening": "استيراد رصيد افتتاحي"}.get(t, t)
     return base + (f" #{int(ref)}" if pd.notna(ref) else "")
 
 
@@ -317,3 +322,208 @@ def explode_requirements(cid, recipe_id, runs, warehouse_id=None) -> pd.DataFram
                      "المتاح": round(have, 4), "العجز": round(max(0.0, q - have), 4),
                      "التكلفة التقديرية": round(q * unit_cost(it["avg_cost"], it["last_price"]), 2)})
     return pd.DataFrame(rows).sort_values("العجز", ascending=False)
+
+
+# ---------------------------------------------------------------- سجل الجرد
+def stocktake_history(cid) -> pd.DataFrame:
+    return query("""SELECT s.id, s.count_date, COALESCE(w.name,'—') AS warehouse, s.created_by,
+                    (SELECT COUNT(*) FROM stocktake_lines l WHERE l.stocktake_id=s.id) AS lines_count,
+                    (SELECT COUNT(*) FROM stocktake_lines l WHERE l.stocktake_id=s.id AND ABS(l.actual_qty-l.system_qty)>0.000001) AS diff_count
+                    FROM stocktakes s LEFT JOIN warehouses w ON w.id=s.warehouse_id WHERE s.client_id=? ORDER BY s.id DESC""", (cid,))
+
+
+def stocktake_lines(stocktake_id) -> pd.DataFrame:
+    """بنود جرد محفوظ: فرق الكمية وقيمته بتكلفة الوحدة الحالية (تقريبية)."""
+    return query("""SELECT i.name AS "الصنف", i.unit AS "الوحدة", l.system_qty AS "رصيد النظام", l.actual_qty AS "الكمية الفعلية",
+                    l.actual_qty - l.system_qty AS "الفرق",
+                    (l.actual_qty - l.system_qty) * CASE WHEN i.avg_cost>0 THEN i.avg_cost ELSE COALESCE(i.last_price,0) END AS "قيمة الفرق"
+                    FROM stocktake_lines l JOIN items i ON i.id=l.item_id WHERE l.stocktake_id=? ORDER BY i.name""", (stocktake_id,))
+
+
+# ---------------------------------------------------------------- القوائم المالية
+def income_statement(cid, start, end) -> dict:
+    """قائمة الدخل التشغيلية للفترة + المصروفات حسب البند + أرصدة الخزينة والبنك + المستحقات."""
+    s, e = str(start), str(end)
+    sales = query("""SELECT s.dish_id, s.qty, s.unit_price FROM pos_sales s WHERE s.client_id=? AND s.sale_date BETWEEN ? AND ?""", (cid, s, e))
+    costs = dish_costs(cid).set_index("dish_id")["cost"]
+    revenue = float((sales["qty"] * sales["unit_price"]).sum()) if not sales.empty else 0.0
+    cogs = float((sales["dish_id"].map(costs).fillna(0) * sales["qty"]).sum()) if not sales.empty else 0.0
+    waste = _f(query("SELECT SUM(cost) v FROM waste_log WHERE client_id=? AND waste_date BETWEEN ? AND ?", (cid, s, e))["v"].iloc[0])
+    exp = query("""SELECT c.name AS "البند", CASE c.nature WHEN 'fixed' THEN 'ثابت' ELSE 'متغير' END AS "الطبيعة", SUM(x.amount) AS "المبلغ"
+                   FROM expenses x JOIN expense_categories c ON c.id=x.category_id WHERE x.client_id=? AND x.exp_date BETWEEN ? AND ?
+                   GROUP BY c.id ORDER BY SUM(x.amount) DESC""", (cid, s, e))
+    opex = float(exp["المبلغ"].sum()) if not exp.empty else 0.0
+    gross = revenue - cogs
+    net = gross - waste - opex
+    pct = lambda v: round(v / revenue * 100, 1) if revenue else 0.0           # noqa: E731
+    stmt = pd.DataFrame([
+        ("إجمالي المبيعات", revenue, 100.0 if revenue else 0.0),
+        ("تكلفة البضاعة المباعة", -cogs, pct(cogs)),
+        ("مجمل الربح", gross, pct(gross)),
+        ("قيمة الهدر والتالف", -waste, pct(waste)),
+        ("المصروفات التشغيلية", -opex, pct(opex)),
+        ("صافي الربح", net, pct(net))], columns=["البند", "المبلغ", "% من المبيعات"])
+    bal = treasury.balances(cid)
+    cash_bank = pd.DataFrame([("الخزينة النقدية", bal["cash"]), ("حساب البنك", bal["bank"]),
+                              ("الإجمالي النقدي", bal["cash"] + bal["bank"])], columns=["الحساب", "الرصيد"])
+    pay = query(f"""SELECT s.name AS "المورد", {SUPPLIER_BALANCE} AS "الرصيد المستحق" FROM suppliers s WHERE s.client_id=? ORDER BY 2 DESC""", (cid,))
+    pay = pay[pay["الرصيد المستحق"].abs() > 0.005]
+    return {"statement": stmt, "expenses": exp, "cash_bank": cash_bank, "payables": pay}
+
+
+# ================================================================= الصلاحية والدفعات
+def expiring_lots(cid, days=14) -> pd.DataFrame:
+    """دفعات ستنتهي صلاحيتها خلال `days` يومًا (أو انتهت بالفعل) وما زال لها رصيد."""
+    limit = str(date.today() + timedelta(days=days))
+    df = query("""SELECT l.id, i.name AS item, i.unit, w.name AS warehouse, l.qty_remaining AS qty, l.expiry_date, l.unit_cost
+                  FROM stock_lots l JOIN items i ON i.id=l.item_id JOIN warehouses w ON w.id=l.warehouse_id
+                  WHERE l.client_id=? AND l.qty_remaining>0.000000001 AND l.expiry_date IS NOT NULL AND l.expiry_date<=?
+                  ORDER BY l.expiry_date, i.name""", (cid, limit))
+    if df.empty:
+        return df
+    today = date.today()
+    df["days_left"] = df["expiry_date"].map(lambda d: (date.fromisoformat(d) - today).days)
+    df["status"] = df["days_left"].map(lambda n: "🔴 منتهي الصلاحية" if n < 0 else "🟠 خلال أسبوع" if n <= 7 else "🟡 خلال أسبوعين")
+    df["value"] = df["qty"] * df["unit_cost"]
+    return df
+
+
+def lots_df(cid, warehouse_id=None) -> pd.DataFrame:
+    """كل الدفعات ذات الرصيد (لشاشة الجرد وتقرير الصلاحية)."""
+    sql = """SELECT i.name AS "الصنف", i.unit AS "الوحدة", w.name AS "المخزن", l.qty_remaining AS "الرصيد", l.expiry_date AS "تاريخ الصلاحية",
+             l.received_date AS "تاريخ الاستلام", l.unit_cost AS "تكلفة الوحدة"
+             FROM stock_lots l JOIN items i ON i.id=l.item_id JOIN warehouses w ON w.id=l.warehouse_id
+             WHERE l.client_id=? AND l.qty_remaining>0.000000001"""
+    params = [cid]
+    if warehouse_id:
+        sql += " AND l.warehouse_id=?"
+        params.append(warehouse_id)
+    df = query(sql + " ORDER BY (l.expiry_date IS NULL), l.expiry_date, i.name", tuple(params))
+    if not df.empty:
+        today = date.today()
+        df["أيام للانتهاء"] = df["تاريخ الصلاحية"].map(lambda d: (date.fromisoformat(d) - today).days if d else None)
+    return df
+
+
+# ================================================================= الأصناف الراكدة
+def dead_stock(cid, days=60) -> pd.DataFrame:
+    """أصناف لها رصيد ولم تُستهلك (بيع/تصنيع/هدر) منذ `days` يومًا أو أكثر، مصنّفة حسب مدة الركود."""
+    today = date.today()
+    items = query("SELECT id, name, unit, qty_on_hand, avg_cost, last_price, is_semi FROM items WHERE client_id=? AND qty_on_hand>0.000001", (cid,))
+    if items.empty:
+        return items
+    last_out = query("""SELECT item_id, MAX(move_date) AS last_out FROM stock_movements WHERE client_id=?
+                        AND move_type IN ('sale','production_out','waste') GROUP BY item_id""", (cid,))
+    last_in = query("""SELECT item_id, MAX(move_date) AS last_in FROM stock_movements WHERE client_id=?
+                       AND move_type IN ('purchase','opening','production_in') GROUP BY item_id""", (cid,))
+    df = items.merge(last_out, left_on="id", right_on="item_id", how="left").drop(columns="item_id")
+    df = df.merge(last_in, left_on="id", right_on="item_id", how="left").drop(columns="item_id")
+
+    def idle(r):
+        ref = r["last_out"] if isinstance(r["last_out"], str) else r["last_in"] if isinstance(r["last_in"], str) else None
+        return (today - date.fromisoformat(ref)).days if ref else 9999
+    df["idle_days"] = df.apply(idle, axis=1)
+    df["value"] = df["qty_on_hand"] * df.apply(lambda r: unit_cost(r["avg_cost"], r["last_price"]), axis=1)
+    df = df[df["idle_days"] >= days].copy()
+    df["class"] = df["idle_days"].map(lambda n: "ميت (180 يومًا فأكثر)" if n >= 180 else "راكد جدًا (90 يومًا فأكثر)" if n >= 90 else "راكد")
+    df["last_out"] = df["last_out"].where(df["last_out"].notna(), None)
+    return df.sort_values("value", ascending=False)
+
+
+# ================================================================= مؤشرات اليوم الحية
+def live_today(cid) -> dict:
+    d = str(date.today())
+    sales = query("SELECT dish_id, qty, unit_price FROM pos_sales WHERE client_id=? AND sale_date=?", (cid, d))
+    costs = dish_costs(cid).set_index("dish_id")["cost"] if not sales.empty else pd.Series(dtype=float)
+    rev = float((sales["qty"] * sales["unit_price"]).sum()) if not sales.empty else 0.0
+    cogs = float((sales["dish_id"].map(costs).fillna(0) * sales["qty"]).sum()) if not sales.empty else 0.0
+    exp = _f(query("SELECT SUM(amount) v FROM expenses WHERE client_id=? AND exp_date=?", (cid, d))["v"].iloc[0])
+    waste = _f(query("SELECT SUM(cost) v FROM waste_log WHERE client_id=? AND waste_date=?", (cid, d))["v"].iloc[0])
+    t = query("""SELECT COALESCE(account,'cash') AS a, direction, SUM(amount) AS v FROM treasury_transactions
+                 WHERE client_id=? AND tx_date=? GROUP BY 1,2""", (cid, d))
+    g = lambda a, k: float(t[(t["a"] == a) & (t["direction"] == k)]["v"].sum()) if not t.empty else 0.0       # noqa: E731
+    recent = query("""SELECT ts, username, action, entity, details, amount FROM audit_log WHERE client_id=?
+                      AND action IN ('create','delete','update','void','approve') ORDER BY id DESC LIMIT 12""", (cid,))
+    return {"date": d, "sales": rev, "sales_lines": int(len(sales)), "cogs": cogs, "expenses": exp, "waste": waste,
+            "profit": rev - cogs - exp - waste, "cash_in": g("cash", "in"), "cash_out": g("cash", "out"),
+            "bank_in": g("bank", "in"), "bank_out": g("bank", "out"), "recent": recent}
+
+
+def smart_alerts(cid) -> dict:
+    """ملخص التنبيهات الذكية (مخزون، صلاحية، ركود، تكاليف ناقصة) للوحة والإشعارات."""
+    ls = low_stock(cid)
+    exp = expiring_lots(cid, 14)
+    return {"stock_out": int((ls["level"] == 3).sum()) if not ls.empty else 0,
+            "stock_critical": int((ls["level"] == 2).sum()) if not ls.empty else 0,
+            "expired": int((exp["days_left"] < 0).sum()) if not exp.empty else 0,
+            "expiring_7": int(((exp["days_left"] >= 0) & (exp["days_left"] <= 7)).sum()) if not exp.empty else 0,
+            "expiring_14": int(((exp["days_left"] > 7) & (exp["days_left"] <= 14)).sum()) if not exp.empty else 0,
+            "dead": int(len(dead_stock(cid, 90))), "no_cost": int(len(cost_warnings(cid)))}
+
+
+# ================================================================= مرتجعات المشتريات
+def returns_list(cid, start, end) -> pd.DataFrame:
+    return query("""SELECT r.id AS "رقم", r.return_date AS "التاريخ", s.name AS "المورد", r.invoice_id AS "الفاتورة", r.reason AS "السبب",
+                    r.subtotal AS "قبل الضريبة", r.vat_amount AS "الضريبة", r.total AS "الإجمالي", r.net_credit AS "صافي الإشعار الدائن",
+                    r.refund_amount AS "المسترد", CASE r.status WHEN 'active' THEN '' ELSE 'ملغي' END AS "الحالة", r.created_by AS "أدخله"
+                    FROM purchase_returns r JOIN suppliers s ON s.id=r.supplier_id
+                    WHERE r.client_id=? AND r.return_date BETWEEN ? AND ? ORDER BY r.id DESC""", (cid, str(start), str(end)))
+
+
+def return_lines(return_id) -> pd.DataFrame:
+    return query("""SELECT i.name AS "الصنف", l.entered_qty AS "الكمية", COALESCE(l.unit_name, i.unit) AS "الوحدة", l.unit_price AS "سعر الوحدة",
+                    l.entered_qty*l.unit_price AS "الإجمالي", l.base_qty AS "ما يعادل", i.unit AS "وحدة الاستهلاك"
+                    FROM purchase_return_lines l JOIN items i ON i.id=l.item_id WHERE l.return_id=?""", (return_id,))
+
+
+# ================================================================= الضرائب والإقفال
+def tax_summary(cid, start, end) -> dict:
+    """ملخص ضريبي للفترة (ورقة عمل تساعد المحاسب على الإقرار، وليست إقرارًا رسميًا).
+
+    ضريبة المبيعات = من إيراد الكاشير حسب نسبة المطعم (client_settings: vat_rate، sales_prices_include_vat).
+    ضريبة المشتريات (المدخلات) = ضريبة الفواتير النشطة - ضريبة المرتجعات النشطة. ضريبة الخصم من الفواتير والمرتجعات.
+    """
+    s, e = str(start), str(end)
+    from utils import controls
+    rate = float(controls.get_setting(None, cid, "vat_rate", 14) or 14)
+    incl = str(controls.get_setting(None, cid, "sales_prices_include_vat", "1")) == "1"
+    gross = _f(query("SELECT SUM(qty*unit_price) v FROM pos_sales WHERE client_id=? AND sale_date BETWEEN ? AND ?", (cid, s, e))["v"].iloc[0])
+    out_vat = gross * rate / (100 + rate) if incl else gross * rate / 100
+    net_sales = gross - out_vat if incl else gross
+    inv_ = query("""SELECT COALESCE(SUM(subtotal),0) AS sub, COALESCE(SUM(vat_amount),0) AS vat, COALESCE(SUM(wht_amount),0) AS wht
+                    FROM purchase_invoices WHERE client_id=? AND COALESCE(status,'active')='active' AND invoice_date BETWEEN ? AND ?""", (cid, s, e)).iloc[0]
+    ret = query("""SELECT COALESCE(SUM(subtotal),0) AS sub, COALESCE(SUM(vat_amount),0) AS vat, COALESCE(SUM(wht_amount),0) AS wht
+                   FROM purchase_returns WHERE client_id=? AND status='active' AND return_date BETWEEN ? AND ?""", (cid, s, e)).iloc[0]
+    in_vat = float(inv_["vat"] - ret["vat"])
+    summary = pd.DataFrame([
+        ("إجمالي المبيعات (حسب الكاشير)", gross), ("المبيعات الخاضعة بعد استبعاد الضريبة", net_sales),
+        (f"ضريبة القيمة المضافة على المبيعات ({rate:g}%)", out_vat),
+        ("مشتريات الفترة قبل الضريبة (بعد المرتجعات)", float(inv_["sub"] - ret["sub"])),
+        ("ضريبة المشتريات القابلة للخصم (بعد المرتجعات)", in_vat),
+        ("صافي ضريبة القيمة المضافة المستحقة (+) / القابلة للترحيل (-)", out_vat - in_vat),
+        ("ضريبة الخصم تحت حساب الدفعات المقدمة المحتجزة (بعد المرتجعات)", float(inv_["wht"] - ret["wht"]))],
+        columns=["البند", "المبلغ"])
+    wht = query("""SELECT s.name AS "المورد", SUM(p.subtotal) AS "قيمة المشتريات", SUM(p.wht_amount) AS "ضريبة الخصم"
+                   FROM purchase_invoices p JOIN suppliers s ON s.id=p.supplier_id
+                   WHERE p.client_id=? AND COALESCE(p.status,'active')='active' AND p.invoice_date BETWEEN ? AND ? AND COALESCE(p.wht_amount,0)>0
+                   GROUP BY s.id ORDER BY 3 DESC""", (cid, s, e))
+    invoices = query("""SELECT p.invoice_date AS "التاريخ", COALESCE(NULLIF(p.invoice_no,''), p.id) AS "رقم الفاتورة", s.name AS "المورد",
+                        p.subtotal AS "قبل الضريبة", p.vat_amount AS "ضريبة القيمة المضافة", p.wht_amount AS "ضريبة الخصم", p.total AS "الإجمالي"
+                        FROM purchase_invoices p JOIN suppliers s ON s.id=p.supplier_id
+                        WHERE p.client_id=? AND COALESCE(p.status,'active')='active' AND p.invoice_date BETWEEN ? AND ?
+                        ORDER BY p.invoice_date""", (cid, s, e))
+    return {"summary": summary, "withholding": wht, "invoices": invoices, "rate": rate, "includes_vat": incl}
+
+
+def monthly_closing(cid, year: int) -> pd.DataFrame:
+    """جدول شهري للسنة: مبيعات، ضريبة مبيعات، ضريبة مشتريات، صافي الضريبة، مصروفات، وصافي ربح تشغيلي."""
+    import calendar
+    rows = []
+    for m in range(1, 13):
+        a, b = date(year, m, 1), date(year, m, calendar.monthrange(year, m)[1])
+        t = tax_summary(cid, a, b)["summary"].set_index("البند")["المبلغ"]
+        st = income_statement(cid, a, b)["statement"].set_index("البند")["المبلغ"]
+        rows.append({"الشهر": f"{year}-{m:02d}", "المبيعات": st["إجمالي المبيعات"], "ضريبة المبيعات": t.iloc[2],
+                     "ضريبة المشتريات": t.iloc[4], "صافي ضريبة القيمة المضافة": t.iloc[5], "ضريبة الخصم": t.iloc[6],
+                     "المصروفات": -st["المصروفات التشغيلية"], "صافي الربح": st["صافي الربح"]})
+    return pd.DataFrame(rows)

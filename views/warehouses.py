@@ -3,7 +3,8 @@ import pandas as pd
 import streamlit as st
 
 from database.db import query
-from utils import theme, auth, inventory, reports
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
+from utils import theme, auth, inventory, reports, documents, controls
 
 
 def _voucher_card(cid, v, user, can_act=True):
@@ -11,7 +12,7 @@ def _voucher_card(cid, v, user, can_act=True):
         a, b, c = st.columns([2, 2, 1])
         a.markdown(f"**إذن تحويل رقم {int(v['id']):05d}** — {v['voucher_date']}")
         b.write(f"من **{v['from_name']}** إلى **{v['to_name']}**")
-        c.write(inventory.STATUS_AR.get(v["status"], v["status"]))
+        c.write(inventory.STATUS_AR.get(v["status"], v["status"]) + (" — معكوس" if int(v.get("is_voided", 0) or 0) else ""))
         st.dataframe(inventory.voucher_lines(int(v["id"])).round(4), use_container_width=True, hide_index=True)
         st.caption(f"أنشأه: {v['created_by']}" + (f" — اعتمده: {v['approved_by']} ({v['approved_at']})" if v["approved_by"] else "") +
                    (f" — {v['notes']}" if v["notes"] else ""))
@@ -125,6 +126,35 @@ def render():
             st.info("لا توجد أذون.")
         for _, v in vs.head(30).iterrows():
             _voucher_card(cid, v, user)
+        if not vs.empty:
+            pv = st.selectbox("طباعة / تصدير إذن", list(vs["id"]), format_func=lambda i: f"إذن رقم {int(i):05d}", key="vch_print")
+            vrow = vs[vs["id"] == pv].iloc[0]
+            export_buttons(inventory.voucher_lines(int(pv)), f"إذن تحويل بين المخازن رقم {int(pv):05d}", "transfer_voucher",
+                           subtitle=f"من {vrow['from_name']} إلى {vrow['to_name']} — {vrow['voucher_date']} — {inventory.STATUS_AR.get(vrow['status'], '')}",
+                           formats={"الكمية": FMT_QTY, "ما يعادل (وحدة الاستهلاك)": FMT_QTY}, key="vch_exp")
+            _voided = bool(int(vrow.get("is_voided", 0) or 0))
+            if vrow["status"] == "approved" and not _voided:
+                if auth.is_admin():
+                    with st.expander("🛠 أدوات المدير العام: إلغاء هذا الإذن المعتمد وعكس أثره"):
+                        vr = st.text_input("سبب الإلغاء", key=f"vvr_{pv}")
+                        vneg = st.checkbox("السماح بالرصيد السالب إن كان جزء من الكمية قد استُهلك", key=f"vvn_{pv}")
+                        if st.button("🗑 إلغاء الإذن وإرجاع الكميات (بتواريخ صلاحيتها) للمخزن المصدر", key=f"vvb_{pv}"):
+                            try:
+                                documents.void_voucher(cid, int(pv), vr, user, vneg)
+                                st.rerun()
+                            except ValueError as ex:
+                                st.error(str(ex))
+                else:
+                    with st.expander("✉️ طلب تعديل/إلغاء هذا الإذن (يصل المدير العام فورًا)"):
+                        rr = st.text_area("السبب", key=f"vrq_{pv}")
+                        if st.button("إرسال الطلب", key=f"vrqb_{pv}"):
+                            try:
+                                controls.create_edit_request(cid, "transfer_voucher", int(pv), rr, "", user)
+                                st.success("تم إرسال الطلب للمدير العام.")
+                            except ValueError as ex:
+                                st.error(str(ex))
+            elif _voided:
+                st.error(f"إذن معكوس. السبب: {vrow.get('void_reason') or '—'}")
 
     with t3:
         mat = reports.warehouse_matrix(cid)
@@ -134,11 +164,14 @@ def render():
             m = st.columns(2)
             m[0].metric("إجمالي قيمة المخزون (كل المخازن)", f"{mat['القيمة'].sum():,.2f}")
             m[1].metric("عدد الأصناف", len(mat))
-            st.dataframe(mat.round(3), use_container_width=True, hide_index=True)
-            st.download_button("تنزيل CSV", mat.to_csv(index=False).encode("utf-8-sig"), file_name="warehouse_balances.csv", mime="text/csv")
+            _tbl9 = mat
+            st.dataframe(_tbl9.round(3), use_container_width=True, hide_index=True)
+            export_buttons(_tbl9, "أرصدة المخازن المجمّعة (كل المخازن)", "warehouse_matrix", subtitle=auth.client_name(), formats={**{c: FMT_QTY for c in _tbl9.columns if c not in ("الصنف", "وحدة الاستهلاك", "تكلفة الوحدة", "القيمة")}, "تكلفة الوحدة": FMT_COST, "القيمة": FMT_MONEY}, totals=["القيمة"], key="wh_matrix")
             st.subheader("قيمة كل مخزن")
             vals = []
             for _, w in whs[whs["is_active"] == 1].iterrows():
                 b = reports.warehouse_balances(cid, int(w["id"]))
                 vals.append({"المخزن": w["name"], "عدد الأصناف": len(b), "القيمة": b["القيمة"].sum() if not b.empty else 0.0})
-            st.dataframe(pd.DataFrame(vals).round(2), use_container_width=True, hide_index=True)
+            _tbl8 = pd.DataFrame(vals)
+            st.dataframe(_tbl8.round(2), use_container_width=True, hide_index=True)
+            export_buttons(_tbl8, "قيمة المخزون لكل مخزن", "warehouse_values", subtitle=auth.client_name(), formats={"القيمة": FMT_MONEY, "عدد الأصناف": "#,##0"}, totals=["القيمة"], key="wh_vals")

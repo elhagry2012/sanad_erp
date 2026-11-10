@@ -2,6 +2,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 from database.db import query
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, services, treasury
 
 
@@ -53,6 +54,10 @@ def render():
         else:
             st.metric("إجمالي المصروفات", f"{df['amount'].sum():,.0f}")
             df["الدفع"] = df["pay_method"].map(treasury.METHOD_AR)
+            _det = df.drop(columns=["pay_method"]).rename(columns={"id": "رقم", "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ", "note": "ملاحظة", "created_by": "سجّله"})
+            _sum = df.groupby("category", as_index=False)["amount"].sum().rename(columns={"category": "البند", "amount": "المبلغ"})
+            export_buttons(sections=[Section("سجل المصروفات", _det, {"المبلغ": FMT_MONEY}, ["المبلغ"]), Section("الملخص حسب البند", _sum, {"المبلغ": FMT_MONEY}, ["المبلغ"])],
+                           title="سجل المصروفات", filename="expenses", subtitle=f"{auth.client_name()} — من {f} إلى {t}", key="exp_exp")
             ed = st.data_editor(df.drop(columns="pay_method"), hide_index=True, use_container_width=True, key="ed_exp",
                                 disabled=["id", "category", "created_by", "الدفع"],
                                 column_config={"id": None, "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ",

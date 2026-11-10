@@ -3,6 +3,7 @@ import plotly.express as px
 import streamlit as st
 
 from database.db import query
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, services, reports
 from utils.reports import _f
 
@@ -71,9 +72,10 @@ def render():
             st.info("لا يوجد هدر مسجل في هذه الفترة.")
         else:
             st.metric("قيمة الهدر", f"{df['cost'].sum():,.2f}")
-            st.dataframe(df.rename(columns={"d": "التاريخ", "what": "البند", "qty": "الكمية", "unit": "الوحدة", "reason": "السبب",
-                                            "cost": "القيمة", "wh": "المخزن", "created_by": "سجّله"}).round(3),
-                         use_container_width=True, hide_index=True, column_config={"id": "رقم"})
+            _tbl13 = df.rename(columns={"d": "التاريخ", "what": "البند", "qty": "الكمية", "unit": "الوحدة", "reason": "السبب",
+                                            "cost": "القيمة", "wh": "المخزن", "created_by": "سجّله"})
+            st.dataframe(_tbl13.round(3), use_container_width=True, hide_index=True, column_config={"id": "رقم"})
+            export_buttons(_tbl13.rename(columns={"id": "رقم"}), "سجل الهدر والتالف", "waste_log", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "القيمة": FMT_MONEY}, totals=["القيمة"], key="waste_log")
             c1, c2 = st.columns([2, 1])
             wid = c1.selectbox("حذف تسجيل (يعيد الكمية للمخزن)", df["id"], key="w_del")
             if c2.button("حذف"):
@@ -104,5 +106,10 @@ def render():
             r.plotly_chart(theme.style_fig(px.bar(top, x="cost", y="what", orientation="h", title="أعلى 10 بنود هدرًا",
                                                   labels={"cost": "القيمة", "what": ""})), use_container_width=True)
             daily = df.groupby("d", as_index=False)["cost"].sum()
+            export_buttons(sections=[
+                Section("الهدر حسب السبب", by_reason.rename(columns={"reason": "السبب", "cost": "القيمة"}), {"القيمة": FMT_MONEY}, ["القيمة"]),
+                Section("أعلى البنود هدرًا", top.rename(columns={"what": "البند", "cost": "القيمة"}), {"القيمة": FMT_MONEY}, ["القيمة"]),
+                Section("الهدر اليومي", daily.rename(columns={"d": "اليوم", "cost": "القيمة"}), {"القيمة": FMT_MONEY}, ["القيمة"])],
+                title="تحليل الهدر والتالف", filename="waste_analysis", subtitle=f"{auth.client_name()} — من {f} إلى {t}", key="waste_an")
             st.plotly_chart(theme.style_fig(px.bar(daily, x="d", y="cost", title="الهدر اليومي", labels={"d": "اليوم", "cost": "القيمة"})),
                             use_container_width=True)

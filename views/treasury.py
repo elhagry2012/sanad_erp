@@ -2,6 +2,7 @@ from datetime import date, timedelta
 import plotly.express as px
 import streamlit as st
 
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, treasury
 
 ACC = {"cash": ("💵 الخزينة النقدية", "الوارد: مبيعات نقدية وقيود الإيداع. المنصرف: سداد نقدي لفواتير الشراء والدفعات والمصروفات."),
@@ -30,8 +31,9 @@ def _account_tab(cid, user, account):
         return
     show = led.rename(columns={"id": "رقم", "tx_date": "التاريخ", "category": "البند", "description": "التفاصيل", "in_amt": "وارد",
                                "out_amt": "منصرف", "balance": "الرصيد", "source": "المصدر", "created_by": "المستخدم"})
-    st.dataframe(show[["رقم", "التاريخ", "البند", "التفاصيل", "وارد", "منصرف", "الرصيد", "المصدر", "المستخدم"]].round(2),
-                 use_container_width=True, hide_index=True)
+    _tbl10 = show[["رقم", "التاريخ", "البند", "التفاصيل", "وارد", "منصرف", "الرصيد", "المصدر", "المستخدم"]]
+    st.dataframe(_tbl10.round(2), use_container_width=True, hide_index=True)
+    export_buttons(_tbl10, f"كشف حساب {treasury.ACCOUNT_AR[account]}", f"ledger_{account}", subtitle=f"{auth.client_name()} — من {f} إلى {t} — الرصيد في بداية الفترة: {opening:,.2f}", formats={"وارد": FMT_MONEY, "منصرف": FMT_MONEY, "الرصيد": FMT_MONEY}, totals=["وارد", "منصرف"], key=f"led_{account}")
     daily = led.groupby(["tx_date", "direction"], as_index=False)["amount"].sum()
     daily["النوع"] = daily["direction"].map({"in": "وارد", "out": "منصرف"})
     fig = px.bar(daily, x="tx_date", y="amount", color="النوع", barmode="group", title="الحركة اليومية",

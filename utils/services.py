@@ -1,5 +1,6 @@
 """منطق الأعمال: كل عملية في معاملة واحدة (BEGIN IMMEDIATE)، بصلاحيات مفروضة، وسجل تدقيق باسم المستخدم."""
 import io
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -8,7 +9,8 @@ from pathlib import Path
 import pandas as pd
 
 from database.db import tx, query, IMAGES_DIR
-from utils import treasury, inventory as inv
+from utils import treasury, inventory as inv, controls
+from utils.ledger import SUPPLIER_BALANCE
 from utils.audit import log
 from utils.security import guard, require, client_of
 
@@ -57,7 +59,7 @@ def add_client(name, cuisine, user, opening_cash=0.0, opening_bank=0.0):
 EDITABLE = {
     "clients": (["name", "cuisine"], "client", "clients"),
     "suppliers": (["name", "phone", "opening_balance"], "supplier", "purchases"),
-    "items": (["name", "unit", "min_qty"], "item", "purchases"),
+    "items": (["name", "unit", "min_qty", "track_expiry", "shelf_life_days"], "item", "purchases"),
     "dishes": (["name", "category", "price"], "dish", "production"),
     "expenses": (["exp_date", "amount", "note"], "expense", "expenses"),
 }
@@ -112,14 +114,14 @@ def add_supplier(cid, name, phone, opening, user):
 
 
 @guard("purchases")
-def add_item(cid, name, unit, min_qty, user, is_semi=0, purchase_unit=None, factor=1.0):
+def add_item(cid, name, unit, min_qty, user, is_semi=0, purchase_unit=None, factor=1.0, track_expiry=False, shelf_life_days=None):
     """unit = وحدة الاستهلاك (الأساسية). purchase_unit + factor: 1 purchase_unit = factor × unit."""
     if not name.strip() or not unit.strip():
         raise ValueError("اسم الصنف ووحدته مطلوبان.")
     try:
         with tx() as c:
-            iid = c.execute("INSERT INTO items(client_id,name,unit,is_semi,min_qty,created_by) VALUES(?,?,?,?,?,?)",
-                            (cid, name.strip(), unit.strip(), is_semi, min_qty, user)).lastrowid
+            iid = c.execute("INSERT INTO items(client_id,name,unit,is_semi,min_qty,track_expiry,shelf_life_days,created_by) VALUES(?,?,?,?,?,?,?,?)",
+                            (cid, name.strip(), unit.strip(), is_semi, min_qty, 1 if track_expiry else 0, shelf_life_days, user)).lastrowid
             _add_purchase_unit(c, iid, unit.strip(), purchase_unit, factor)
             log(c, user, "create", "item", iid, name.strip(), None, cid)
     except sqlite3.IntegrityError:
@@ -166,23 +168,15 @@ def _save_invoice_image(data: bytes, filename: str) -> str:
 def _norm_line(l):
     if isinstance(l, (tuple, list)):
         i, q, p = l[:3]
-        return {"item_id": int(i), "qty": float(q), "price": float(p), "unit": None}
+        return {"item_id": int(i), "qty": float(q), "price": float(p), "unit": None, "expiry": None}
     return {"item_id": l.get("item_id"), "new_name": (l.get("new_name") or "").strip(),
             "new_unit": (l.get("new_unit") or "").strip(), "new_purchase_unit": (l.get("new_purchase_unit") or "").strip(),
-            "new_factor": float(l.get("new_factor") or 1), "unit": (l.get("unit") or "").strip() or None,
-            "qty": float(l["qty"]), "price": float(l["price"])}
+            "new_factor": float(l.get("new_factor") or 1), "new_track_expiry": bool(l.get("new_track_expiry")),
+            "new_shelf_life": l.get("new_shelf_life"), "unit": (l.get("unit") or "").strip() or None,
+            "expiry": (str(l["expiry"]) if l.get("expiry") else None), "qty": float(l["qty"]), "price": float(l["price"])}
 
 
-@guard("purchases")
-def add_purchase(cid, supplier_id, invoice_no, inv_date, lines, paid, user, *, vat_rate=0.0, wht_rate=0.0,
-                 image=None, pay_method="cash", warehouse_id=None, from_treasury=None):
-    """فاتورة شراء كاملة في معاملة واحدة.
-
-    الكمية والسعر بوحدة الشراء المختارة (كرتونة مثلًا)؛ تُحوَّل تلقائيًا لوحدة الاستهلاك (قطعة) ويُحسب
-    المتوسط المرجح للتكلفة لكل وحدة استهلاك. التكلفة تُحسب بالسعر قبل الضريبة.
-    """
-    pay_method = _method(pay_method, from_treasury)
-    account = treasury.account_of(pay_method)
+def _prepare_purchase(lines, paid, vat_rate, wht_rate):
     lines = [_norm_line(l) for l in lines]
     if not lines:
         raise ValueError("أضف صنفًا واحدًا على الأقل.")
@@ -191,61 +185,92 @@ def add_purchase(cid, supplier_id, invoice_no, inv_date, lines, paid, user, *, v
             raise ValueError("الكمية يجب أن تكون أكبر من صفر والسعر غير سالب.")
         if not l["item_id"] and not (l.get("new_name") and l.get("new_unit")):
             raise ValueError("سطر بدون صنف: اختر صنفًا أو أدخل اسم ووحدة الصنف الجديد.")
+        if l["expiry"] and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", l["expiry"]):
+            raise ValueError("تاريخ الصلاحية غير صالح.")
     if not (0 <= vat_rate <= 100 and 0 <= wht_rate <= 100):
         raise ValueError("نسبة الضريبة يجب أن تكون بين 0 و100.")
     t = calc_invoice([(l["qty"], l["price"]) for l in lines], vat_rate, wht_rate)
     if paid < 0 or paid > t["net_due"] + 0.005:
         raise ValueError("المبلغ المدفوع يجب أن يكون بين صفر وصافي المستحق للمورد.")
+    return lines, t
+
+
+def _add_purchase_c(c, cid, supplier_id, invoice_no, inv_date, lines, t, paid, user, vat_rate, wht_rate,
+                    saved_image, pay_method, warehouse_id, replaces_id=None):
+    """جسم فاتورة الشراء داخل معاملة قائمة (يُستخدم من add_purchase ومن «تعديل الفاتورة»)."""
+    account = treasury.account_of(pay_method)
+    controls.check_open(c, cid, inv_date)
+    if not c.execute("SELECT 1 FROM suppliers WHERE id=? AND client_id=?", (supplier_id, cid)).fetchone():
+        raise ValueError("المورد غير موجود.")
+    wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "purchase")
+    invoice = c.execute(
+        "INSERT INTO purchase_invoices(client_id,supplier_id,invoice_no,invoice_date,total,paid,subtotal,"
+        "vat_rate,vat_amount,wht_rate,wht_amount,image_path,warehouse_id,pay_method,created_by,replaces_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, supplier_id, invoice_no.strip(), str(inv_date), t["total"], paid, t["subtotal"], vat_rate,
+         t["vat"], wht_rate, t["wht"], saved_image, wh, pay_method, user, replaces_id)).lastrowid
+    created = {}
+    for l in lines:
+        item_id, unit = l["item_id"], l["unit"]
+        if not item_id:
+            nm = l["new_name"]
+            if nm in created:
+                item_id = created[nm]
+            else:
+                if c.execute("SELECT 1 FROM items WHERE client_id=? AND name=?", (cid, nm)).fetchone():
+                    raise ValueError(f"الصنف «{nm}» موجود بالفعل، اخترْه من القائمة.")
+                item_id = c.execute("INSERT INTO items(client_id,name,unit,is_semi,track_expiry,shelf_life_days,created_by) VALUES(?,?,?,0,?,?,?)",
+                                    (cid, nm, l["new_unit"], 1 if l["new_track_expiry"] else 0, l["new_shelf_life"], user)).lastrowid
+                _add_purchase_unit(c, item_id, l["new_unit"], l["new_purchase_unit"], l["new_factor"])
+                created[nm] = item_id
+                log(c, user, "create", "item", item_id, f"{nm} (من فاتورة شراء {invoice})", None, cid)
+            unit = l["new_purchase_unit"] or None
+        row = c.execute("SELECT qty_on_hand, avg_cost, track_expiry, name FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone()
+        if not row:
+            raise ValueError("صنف غير موجود.")
+        old_qty, old_avg, track, iname = row
+        expiry = l["expiry"]
+        if track and not expiry:
+            raise ValueError(f"تاريخ الصلاحية مطلوب للصنف «{iname}».")
+        if expiry and expiry < str(inv_date):
+            raise ValueError(f"تاريخ صلاحية «{iname}» ({expiry}) قبل تاريخ الفاتورة.")
+        bq, factor, uname = inv.to_base(c, item_id, l["qty"], unit, strict_discrete=True)
+        value = l["qty"] * l["price"]
+        new_avg = (old_qty * old_avg + value) / (old_qty + bq) if old_qty > 0 else value / bq
+        base_price = inv.rnd(l["price"] / factor)
+        line_id = c.execute("INSERT INTO purchase_lines(invoice_id,item_id,qty,unit_price,unit_name,unit_factor,expiry_date) VALUES(?,?,?,?,?,?,?)",
+                            (invoice, item_id, l["qty"], l["price"], uname, factor, expiry)).lastrowid
+        c.execute("UPDATE items SET avg_cost=?, last_price=?, updated_by=?, updated_at=? WHERE id=?",
+                  (round(new_avg, 8), base_price, user, _now(), item_id))
+        c.execute("INSERT INTO price_history(item_id,price_date,unit_price,ref_id) VALUES(?,?,?,?)", (item_id, str(inv_date), base_price, invoice))
+        inv.adj_move(c, cid, item_id, wh, inv_date, "purchase", bq, base_price, invoice, user,
+                     expiry=expiry, unit_cost=base_price, received=inv_date, source=("purchase_line", line_id))
+    if account and paid > 0:
+        treasury.post(c, cid, inv_date, "out", paid, "مشتريات",
+                      f"سداد فاتورة شراء {invoice_no.strip() or invoice}", "purchase_invoice", invoice, user, account)
+    log(c, user, "create", "purchase_invoice", invoice,
+        f"فاتورة {invoice_no.strip() or invoice} - {len(lines)} صنف" + (" - بصورة مرفقة" if saved_image else "") +
+        (f" - بديلة للفاتورة #{replaces_id}" if replaces_id else ""), t["total"], cid)
+    controls.notify_if_large(c, cid, "thr_purchase", t["total"], f"فاتورة شراء {invoice_no.strip() or invoice}", user)
+    return invoice
+
+
+@guard("purchases")
+def add_purchase(cid, supplier_id, invoice_no, inv_date, lines, paid, user, *, vat_rate=0.0, wht_rate=0.0,
+                 image=None, pay_method="cash", warehouse_id=None, from_treasury=None):
+    """فاتورة شراء كاملة في معاملة واحدة.
+
+    الكمية والسعر بوحدة الشراء المختارة (كرتونة مثلًا)؛ تُحوَّل تلقائيًا لوحدة الاستهلاك (قطعة) ويُحسب
+    المتوسط المرجح للتكلفة لكل وحدة استهلاك. لكل سطر تاريخ صلاحية اختياري (إلزامي للأصناف المتتبَّعة) تُنشأ له دفعة.
+    """
+    pay_method = _method(pay_method, from_treasury)
+    treasury.account_of(pay_method)
+    lines, t = _prepare_purchase(lines, paid, vat_rate, wht_rate)
     saved_image = _save_invoice_image(*image) if image else None
     try:
         with tx() as c:
-            if not c.execute("SELECT 1 FROM suppliers WHERE id=? AND client_id=?", (supplier_id, cid)).fetchone():
-                raise ValueError("المورد غير موجود.")
-            wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "purchase")
-            invoice = c.execute(
-                "INSERT INTO purchase_invoices(client_id,supplier_id,invoice_no,invoice_date,total,paid,subtotal,"
-                "vat_rate,vat_amount,wht_rate,wht_amount,image_path,warehouse_id,pay_method,created_by) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (cid, supplier_id, invoice_no.strip(), str(inv_date), t["total"], paid, t["subtotal"], vat_rate,
-                 t["vat"], wht_rate, t["wht"], saved_image, wh, pay_method, user)).lastrowid
-            created = {}
-            for l in lines:
-                item_id, unit = l["item_id"], l["unit"]
-                if not item_id:
-                    nm = l["new_name"]
-                    if nm in created:
-                        item_id = created[nm]
-                    else:
-                        if c.execute("SELECT 1 FROM items WHERE client_id=? AND name=?", (cid, nm)).fetchone():
-                            raise ValueError(f"الصنف «{nm}» موجود بالفعل، اخترْه من القائمة.")
-                        item_id = c.execute("INSERT INTO items(client_id,name,unit,is_semi,created_by) VALUES(?,?,?,0,?)",
-                                            (cid, nm, l["new_unit"], user)).lastrowid
-                        _add_purchase_unit(c, item_id, l["new_unit"], l["new_purchase_unit"], l["new_factor"])
-                        created[nm] = item_id
-                        log(c, user, "create", "item", item_id, f"{nm} (من فاتورة شراء {invoice})", None, cid)
-                    unit = l["new_purchase_unit"] or None
-                row = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone()
-                if not row:
-                    raise ValueError("صنف غير موجود.")
-                old_qty, old_avg = row
-                bq, factor, uname = inv.to_base(c, item_id, l["qty"], unit, strict_discrete=True)
-                value = l["qty"] * l["price"]
-                new_avg = (old_qty * old_avg + value) / (old_qty + bq) if old_qty > 0 else value / bq
-                base_price = inv.rnd(l["price"] / factor)
-                c.execute("INSERT INTO purchase_lines(invoice_id,item_id,qty,unit_price,unit_name,unit_factor) VALUES(?,?,?,?,?,?)",
-                          (invoice, item_id, l["qty"], l["price"], uname, factor))
-                inv.adjust(c, cid, item_id, wh, bq)
-                c.execute("UPDATE items SET avg_cost=?, last_price=?, updated_by=?, updated_at=? WHERE id=?",
-                          (inv.rnd(new_avg), base_price, user, _now(), item_id))
-                c.execute("INSERT INTO price_history(item_id,price_date,unit_price) VALUES(?,?,?)",
-                          (item_id, str(inv_date), base_price))
-                inv.move(c, cid, item_id, wh, inv_date, "purchase", bq, base_price, invoice, user)
-            if account and paid > 0:
-                treasury.post(c, cid, inv_date, "out", paid, "مشتريات",
-                              f"سداد فاتورة شراء {invoice_no.strip() or invoice}", "purchase_invoice", invoice, user, account)
-            log(c, user, "create", "purchase_invoice", invoice,
-                f"فاتورة {invoice_no.strip() or invoice} - {len(lines)} صنف" + (" - بصورة مرفقة" if saved_image else ""),
-                t["total"], cid)
+            invoice = _add_purchase_c(c, cid, supplier_id, invoice_no, inv_date, lines, t, paid, user, vat_rate, wht_rate,
+                                      saved_image, pay_method, warehouse_id)
     except BaseException:
         if saved_image:
             (IMAGES_DIR / saved_image).unlink(missing_ok=True)
@@ -260,6 +285,7 @@ def add_payment(cid, supplier_id, pay_date, amount, note, user, pay_method="cash
     if amount <= 0:
         raise ValueError("المبلغ يجب أن يكون أكبر من صفر.")
     with tx() as c:
+        controls.check_open(c, cid, pay_date)
         sup = c.execute("SELECT name FROM suppliers WHERE id=? AND client_id=?", (supplier_id, cid)).fetchone()
         if not sup:
             raise ValueError("المورد غير موجود.")
@@ -269,17 +295,13 @@ def add_payment(cid, supplier_id, pay_date, amount, note, user, pay_method="cash
             treasury.post(c, cid, pay_date, "out", amount, "دفعة مورد",
                           f"{sup[0]} {('- ' + note.strip()) if note.strip() else ''}".strip(), "supplier_payment", pid, user, account)
         log(c, user, "create", "supplier_payment", pid, note.strip(), amount, cid)
+        controls.notify_if_large(c, cid, "thr_payment", amount, f"دفعة لمورد {sup[0]}", user)
 
 
 def supplier_balances(cid) -> pd.DataFrame:
-    """الرصيد المستحق = رصيد أول المدة + صافي الفواتير (بعد خصم ضريبة الخصم) - المدفوع - الدفعات."""
-    return query("""
-        SELECT s.id, s.name AS "المورد",
-          s.opening_balance
-          + COALESCE((SELECT SUM(total - COALESCE(wht_amount,0)) FROM purchase_invoices WHERE supplier_id=s.id),0)
-          - COALESCE((SELECT SUM(paid)  FROM purchase_invoices WHERE supplier_id=s.id),0)
-          - COALESCE((SELECT SUM(amount) FROM supplier_payments WHERE supplier_id=s.id),0) AS "الرصيد المستحق"
-        FROM suppliers s WHERE s.client_id=? ORDER BY s.name""", (cid,))
+    """الرصيد المستحق = أول المدة + صافي الفواتير النشطة - المدفوع - الدفعات - المرتجعات + المستردات (ledger.SUPPLIER_BALANCE)."""
+    return query(f"""SELECT s.id, s.name AS "المورد", {SUPPLIER_BALANCE} AS "الرصيد المستحق"
+                     FROM suppliers s WHERE s.client_id=? ORDER BY s.name""", (cid,))
 
 
 # ======================= الوصفات والتصنيع =======================
@@ -305,40 +327,49 @@ def _insert_recipe_lines(c, rid, resolved):
                   [(rid, i, bq, eq, eu) for i, bq, eq, eu in resolved])
 
 
-@guard("production")
-def create_semi(cid, name, unit, yield_qty, lines, user):
+def _create_semi_c(c, cid, name, unit, yield_qty, lines, user):
+    """ينشئ منتجًا نصف مصنع داخل معاملة قائمة (يستخدمه الاستيراد الجماعي لضمان الذرية)."""
     if yield_qty <= 0:
         raise ValueError("كمية الناتج يجب أن تكون أكبر من صفر.")
-    with tx() as c:
-        row = c.execute("SELECT id,is_semi FROM items WHERE client_id=? AND name=?", (cid, name.strip())).fetchone()
-        if row and not row[1]:
-            raise ValueError("يوجد صنف خام بنفس الاسم. اختر اسمًا مختلفًا.")
-        if row and c.execute("SELECT 1 FROM recipes WHERE output_item_id=?", (row[0],)).fetchone():
-            raise ValueError("توجد وصفة لهذا المنتج بالفعل. عدّلها من تبويب التعديل.")
-        out_id = row[0] if row else c.execute("INSERT INTO items(client_id,name,unit,is_semi,created_by) VALUES(?,?,?,1,?)",
-                                              (cid, name.strip(), unit.strip(), user)).lastrowid
-        resolved = _resolve_lines(c, cid, lines)
-        if any(i == out_id for i, *_ in resolved):
-            raise ValueError("لا يمكن أن يكون المنتج أحد مكونات نفسه.")
-        rid = c.execute("INSERT INTO recipes(client_id,name,kind,output_item_id,yield_qty,created_by) VALUES(?,?,'semi',?,?,?)",
-                        (cid, name.strip(), out_id, yield_qty, user)).lastrowid
-        _insert_recipe_lines(c, rid, resolved)
-        log(c, user, "create", "recipe", rid, f"نصف مصنع: {name.strip()}", None, cid)
+    row = c.execute("SELECT id,is_semi FROM items WHERE client_id=? AND name=?", (cid, name.strip())).fetchone()
+    if row and not row[1]:
+        raise ValueError("يوجد صنف خام بنفس الاسم. اختر اسمًا مختلفًا.")
+    if row and c.execute("SELECT 1 FROM recipes WHERE output_item_id=?", (row[0],)).fetchone():
+        raise ValueError("توجد وصفة لهذا المنتج بالفعل. عدّلها من تبويب التعديل.")
+    out_id = row[0] if row else c.execute("INSERT INTO items(client_id,name,unit,is_semi,created_by) VALUES(?,?,?,1,?)",
+                                          (cid, name.strip(), unit.strip(), user)).lastrowid
+    resolved = _resolve_lines(c, cid, lines)
+    if any(i == out_id for i, *_ in resolved):
+        raise ValueError("لا يمكن أن يكون المنتج أحد مكونات نفسه.")
+    rid = c.execute("INSERT INTO recipes(client_id,name,kind,output_item_id,yield_qty,created_by) VALUES(?,?,'semi',?,?,?)",
+                    (cid, name.strip(), out_id, yield_qty, user)).lastrowid
+    _insert_recipe_lines(c, rid, resolved)
+    log(c, user, "create", "recipe", rid, f"نصف مصنع: {name.strip()}", None, cid)
     return rid
+
+
+def _create_dish_c(c, cid, name, category, price, lines, user):
+    if price <= 0:
+        raise ValueError("سعر البيع يجب أن يكون أكبر من صفر.")
+    resolved = _resolve_lines(c, cid, lines)
+    rid = c.execute("INSERT INTO recipes(client_id,name,kind,created_by) VALUES(?,?,'dish',?)", (cid, name.strip(), user)).lastrowid
+    _insert_recipe_lines(c, rid, resolved)
+    did = c.execute("INSERT INTO dishes(client_id,name,category,price,recipe_id,created_by) VALUES(?,?,?,?,?,?)",
+                    (cid, name.strip(), category.strip(), price, rid, user)).lastrowid
+    log(c, user, "create", "dish", did, f"وجبة: {name.strip()} بسعر {price}", None, cid)
+    return did
+
+
+@guard("production")
+def create_semi(cid, name, unit, yield_qty, lines, user):
+    with tx() as c:
+        return _create_semi_c(c, cid, name, unit, yield_qty, lines, user)
 
 
 @guard("production")
 def create_dish(cid, name, category, price, lines, user):
-    if price <= 0:
-        raise ValueError("سعر البيع يجب أن يكون أكبر من صفر.")
     with tx() as c:
-        resolved = _resolve_lines(c, cid, lines)
-        rid = c.execute("INSERT INTO recipes(client_id,name,kind,created_by) VALUES(?,?,'dish',?)", (cid, name.strip(), user)).lastrowid
-        _insert_recipe_lines(c, rid, resolved)
-        did = c.execute("INSERT INTO dishes(client_id,name,category,price,recipe_id,created_by) VALUES(?,?,?,?,?,?)",
-                        (cid, name.strip(), category.strip(), price, rid, user)).lastrowid
-        log(c, user, "create", "dish", did, f"وجبة: {name.strip()} بسعر {price}", None, cid)
-    return did
+        return _create_dish_c(c, cid, name, category, price, lines, user)
 
 
 def replace_recipe_lines(recipe_id, lines, user, client_id=None, yield_qty=None):
@@ -368,6 +399,7 @@ def produce_batch(cid, recipe_id, runs, day, user, allow_negative=False, warehou
             raise ValueError("اختر وصفة منتج نصف مصنع.")
         name, _, out_id, yld = rec
         wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "ops")
+        controls.check_open(c, cid, day)
         lines = c.execute("SELECT rl.item_id, rl.qty*?, i.avg_cost, i.last_price, i.name FROM recipe_lines rl "
                           "JOIN items i ON i.id=rl.item_id WHERE rl.recipe_id=?", (runs, recipe_id)).fetchall()
         need = {}
@@ -386,14 +418,12 @@ def produce_batch(cid, recipe_id, runs, day, user, allow_negative=False, warehou
         batch = c.execute("INSERT INTO production_batches(client_id,recipe_id,batch_date,output_qty,total_cost,created_by) "
                           "VALUES(?,?,?,?,?,?)", (cid, recipe_id, str(day), out_qty, cost, user)).lastrowid
         for item_id, q, a, l_, _ in lines:
-            inv.adjust(c, cid, item_id, wh, -q)
-            inv.move(c, cid, item_id, wh, day, "production_out", -q, inv.unit_cost(a, l_), batch, user)
+            inv.adj_move(c, cid, item_id, wh, day, "production_out", -q, inv.unit_cost(a, l_), batch, user)
         old_qty, old_avg = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=?", (out_id,)).fetchone()
         new_avg = cost / out_qty if old_qty <= 0 else (old_qty * old_avg + cost) / (old_qty + out_qty)
-        inv.adjust(c, cid, out_id, wh, out_qty)
         c.execute("UPDATE items SET avg_cost=?, last_price=?, updated_by=?, updated_at=? WHERE id=?",
-                  (inv.rnd(new_avg), inv.rnd(cost / out_qty), user, _now(), out_id))
-        inv.move(c, cid, out_id, wh, day, "production_in", out_qty, cost / out_qty, batch, user)
+                  (round(new_avg, 8), inv.rnd(cost / out_qty), user, _now(), out_id))
+        inv.adj_move(c, cid, out_id, wh, day, "production_in", out_qty, cost / out_qty, batch, user)
         log(c, user, "create", "production_batch", batch, f"{name} × {runs:g} = {out_qty:g}", cost, cid)
     return batch, cost, out_qty
 
@@ -420,6 +450,8 @@ def record_sales(cid, rows, user, payment="cash", bank_amount=0.0, channel="dine
     detail = (channel_detail or "").strip()
     with tx() as c:
         wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "ops")
+        for d_ in {r[0] for r in rows}:
+            controls.check_open(c, cid, d_)
         dishes = {}
         for _, did, _ in rows:
             if did not in dishes:
@@ -449,8 +481,7 @@ def record_sales(cid, rows, user, payment="cash", bank_amount=0.0, channel="dine
             for item_id, rq, avg, last in c.execute(
                     "SELECT rl.item_id, rl.qty, i.avg_cost, i.last_price FROM recipe_lines rl JOIN items i ON i.id=rl.item_id "
                     "WHERE rl.recipe_id=?", (recipe_id,)).fetchall():
-                inv.adjust(c, cid, item_id, wh, -rq * qty)
-                inv.move(c, cid, item_id, wh, day, "sale", -rq * qty, inv.unit_cost(avg, last), sid, user)
+                inv.adj_move(c, cid, item_id, wh, day, "sale", -rq * qty, inv.unit_cost(avg, last), sid, user)
         label = CHANNELS[channel] + (f" - {detail}" if detail else "")
         for day, cb in by_day.items():
             cash_tx = treasury.post(c, cid, day, "in", cb["cash"], "مبيعات كاشير", f"مبيعات {day} - {label}", "sale_batch", None, user, "cash")
@@ -469,11 +500,12 @@ def delete_sale(sale_id, user, client_id=None):
         raise ValueError("السجل غير موجود.")
     require(user, "sales", owner)
     with tx() as c:
-        s_ = c.execute("SELECT qty, unit_price, treasury_tx_id, bank_tx_id, cash_amount, bank_amount FROM pos_sales WHERE id=?",
+        s_ = c.execute("SELECT qty, unit_price, treasury_tx_id, bank_tx_id, cash_amount, bank_amount, sale_date FROM pos_sales WHERE id=?",
                        (sale_id,)).fetchone()
-        for item_id, wh_id, qty in c.execute("SELECT item_id, warehouse_id, qty FROM stock_movements "
-                                             "WHERE move_type='sale' AND ref_id=?", (sale_id,)).fetchall():
-            inv.adjust(c, owner, item_id, wh_id, -qty)
+        controls.check_open(c, owner, s_[6])
+        for item_id, wh_id, qty, lots in c.execute("SELECT item_id, warehouse_id, qty, lots FROM stock_movements "
+                                                   "WHERE move_type='sale' AND ref_id=?", (sale_id,)).fetchall():
+            inv.adjust(c, owner, item_id, wh_id, -qty, restore=inv.lots_of(lots))
         c.execute("DELETE FROM stock_movements WHERE move_type='sale' AND ref_id=?", (sale_id,))
         value = s_[0] * s_[1]
         cash_part = s_[4] if s_[4] is not None else (value if s_[2] else 0.0)     # سجلات قديمة: كلها نقدي
@@ -492,13 +524,13 @@ def record_waste(cid, day, item_id, qty, reason, user, warehouse_id=None, unit=N
         if not row:
             raise ValueError("الصنف غير موجود.")
         wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "ops")
+        controls.check_open(c, cid, day)
         bq, _, _ = inv.to_base(c, item_id, qty, unit, strict_discrete=True)
         uc = inv.unit_cost(*row)
         cost = bq * uc
         wid = c.execute("INSERT INTO waste_log(client_id,waste_date,item_id,qty,reason,cost,warehouse_id,created_by) "
                         "VALUES(?,?,?,?,?,?,?,?)", (cid, str(day), item_id, bq, reason, cost, wh, user)).lastrowid
-        inv.adjust(c, cid, item_id, wh, -bq)
-        inv.move(c, cid, item_id, wh, day, "waste", -bq, uc, wid, user)
+        inv.adj_move(c, cid, item_id, wh, day, "waste", -bq, uc, wid, user)
         log(c, user, "create", "waste", wid, reason, cost, cid)
     return cost
 
@@ -513,14 +545,14 @@ def record_waste_dish(cid, day, dish_id, qty, reason, user, warehouse_id=None):
         if not d:
             raise ValueError("الوجبة غير موجودة.")
         wh = inv.check_wh(c, cid, warehouse_id) if warehouse_id else inv.default_wh(c, cid, "ops")
+        controls.check_open(c, cid, day)
         comps = c.execute("SELECT rl.item_id, rl.qty, i.avg_cost, i.last_price FROM recipe_lines rl JOIN items i ON i.id=rl.item_id "
                           "WHERE rl.recipe_id=?", (d[0],)).fetchall()
         cost = sum(rq * qty * inv.unit_cost(a, l_) for _, rq, a, l_ in comps)
         wid = c.execute("INSERT INTO waste_log(client_id,waste_date,dish_id,qty,reason,cost,warehouse_id,created_by) "
                         "VALUES(?,?,?,?,?,?,?,?)", (cid, str(day), dish_id, qty, reason, cost, wh, user)).lastrowid
         for item_id, rq, a, l_ in comps:
-            inv.adjust(c, cid, item_id, wh, -rq * qty)
-            inv.move(c, cid, item_id, wh, day, "waste", -rq * qty, inv.unit_cost(a, l_), wid, user)
+            inv.adj_move(c, cid, item_id, wh, day, "waste", -rq * qty, inv.unit_cost(a, l_), wid, user)
         log(c, user, "create", "waste", wid, f"وجبة {d[1]} × {qty:g} - {reason}", cost, cid)
     return cost
 
@@ -531,10 +563,11 @@ def delete_waste(waste_id, user, client_id=None):
         raise ValueError("السجل غير موجود.")
     require(user, "waste", owner)
     with tx() as c:
-        cost = c.execute("SELECT cost FROM waste_log WHERE id=?", (waste_id,)).fetchone()[0]
-        for item_id, wh_id, qty in c.execute("SELECT item_id, warehouse_id, qty FROM stock_movements "
-                                             "WHERE move_type='waste' AND ref_id=?", (waste_id,)).fetchall():
-            inv.adjust(c, owner, item_id, wh_id, -qty)
+        cost, wdate = c.execute("SELECT cost, waste_date FROM waste_log WHERE id=?", (waste_id,)).fetchone()
+        controls.check_open(c, owner, wdate)
+        for item_id, wh_id, qty, lots in c.execute("SELECT item_id, warehouse_id, qty, lots FROM stock_movements "
+                                                   "WHERE move_type='waste' AND ref_id=?", (waste_id,)).fetchall():
+            inv.adjust(c, owner, item_id, wh_id, -qty, restore=inv.lots_of(lots))
         c.execute("DELETE FROM stock_movements WHERE move_type='waste' AND ref_id=?", (waste_id,))
         c.execute("DELETE FROM waste_log WHERE id=?", (waste_id,))
         log(c, user, "delete", "waste", waste_id, "حذف تسجيل هدر وإرجاع المخزون", cost, owner)
@@ -561,6 +594,7 @@ def add_expense(cid, category_id, day, amount, note, user, pay_method="cash", fr
     if amount <= 0:
         raise ValueError("المبلغ يجب أن يكون أكبر من صفر.")
     with tx() as c:
+        controls.check_open(c, cid, day)
         cat = c.execute("SELECT name FROM expense_categories WHERE id=?", (category_id,)).fetchone()
         if not cat:
             raise ValueError("بند المصروف غير موجود.")
@@ -570,6 +604,7 @@ def add_expense(cid, category_id, day, amount, note, user, pay_method="cash", fr
             treasury.post(c, cid, day, "out", amount, "مصروف", f"{cat[0]} {('- ' + note.strip()) if note.strip() else ''}".strip(),
                           "expense", eid, user, account)
         log(c, user, "create", "expense", eid, note.strip(), amount, cid)
+        controls.notify_if_large(c, cid, "thr_expense", amount, f"مصروف {cat[0]}", user)
 
 
 def delete_expense(expense_id, user, client_id=None):
@@ -578,7 +613,8 @@ def delete_expense(expense_id, user, client_id=None):
         raise ValueError("السجل غير موجود.")
     require(user, "expenses", owner)
     with tx() as c:
-        amount = c.execute("SELECT amount FROM expenses WHERE id=?", (expense_id,)).fetchone()[0]
+        amount, exp_date = c.execute("SELECT amount, exp_date FROM expenses WHERE id=?", (expense_id,)).fetchone()
+        controls.check_open(c, owner, exp_date)
         c.execute("DELETE FROM expenses WHERE id=?", (expense_id,))
         treasury.remove_by_source(c, "expense", expense_id)
         log(c, user, "delete", "expense", expense_id, "حذف مصروف", amount, owner)

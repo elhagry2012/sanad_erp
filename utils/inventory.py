@@ -11,6 +11,7 @@ import pandas as pd
 from database.db import tx, query
 from utils.audit import log
 from utils.security import guard
+from utils import controls
 
 DECIMALS = 6
 DISCRETE_UNITS = {"قطعة", "حبة", "علبة", "كيس", "كرتونة", "عبوة", "رغيف", "piece", "pcs", "pc", "unit", "can", "bag", "box"}
@@ -54,19 +55,104 @@ def wh_qty(c, wh_id, item_id) -> float:
     return float(r[0]) if r else 0.0
 
 
-def adjust(c, cid, item_id, wh_id, delta) -> None:
-    """يغيّر رصيد صنف في مخزن محدد، ويحدّث الرصيد الإجمالي items.qty_on_hand معه (متسقان دائمًا)."""
+def _consume_lots(c, item_id, wh_id, qty, prefer=None):
+    """يخصم من الدفعات بنظام FEFO (الأقرب انتهاءً أولًا، والبدون صلاحية آخرًا). prefer = دفعة تُستهلك أولًا."""
+    need, out, rows = float(qty), [], []
+    if prefer:
+        r = c.execute("SELECT id, qty_remaining FROM stock_lots WHERE id=? AND item_id=? AND warehouse_id=? AND qty_remaining>0.000000001",
+                      (prefer, item_id, wh_id)).fetchone()
+        if r:
+            rows.append(r)
+    rows += [r for r in c.execute("SELECT id, qty_remaining FROM stock_lots WHERE item_id=? AND warehouse_id=? AND qty_remaining>0.000000001 "
+                                  "ORDER BY (expiry_date IS NULL), expiry_date, id", (item_id, wh_id)).fetchall()
+             if not prefer or r[0] != prefer]
+    for lot_id, rem in rows:
+        if need <= 1e-9:
+            break
+        take = min(rem, need)
+        c.execute("UPDATE stock_lots SET qty_remaining=ROUND(qty_remaining-?, 6) WHERE id=?", (take, lot_id))
+        out.append([lot_id, rnd(take)])
+        need -= take
+    return out
+
+
+def adjust(c, cid, item_id, wh_id, delta, *, expiry=None, unit_cost=None, received=None, source=None,
+           restore=None, clone_from=None, prefer_lot=None):
+    """يغيّر رصيد صنف في مخزن محدد، ويحدّث الرصيد الإجمالي items.qty_on_hand معه (متسقان دائمًا).
+
+    الدفعات: الصرف يخصم FEFO (أو prefer_lot أولًا) ويرجع قائمة [[lot_id, qty]]؛
+    الدخول يُنشئ دفعة إن وُجد expiry، أو يعيد كميات لدفعات سابقة (restore)، أو ينسخ دفعات من مخزن آخر (clone_from).
+    """
     if not c.execute("SELECT 1 FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone():
         raise ValueError("صنف غير موجود لهذا المطعم.")
+    delta = rnd(delta)
     c.execute("""INSERT INTO warehouse_stock(warehouse_id,item_id,qty) VALUES(?,?,?)
-                 ON CONFLICT(warehouse_id,item_id) DO UPDATE SET qty=ROUND(qty+excluded.qty, 6)""",
-              (wh_id, item_id, rnd(delta)))
-    c.execute("UPDATE items SET qty_on_hand=ROUND(qty_on_hand+?, 6) WHERE id=?", (rnd(delta), item_id))
+                 ON CONFLICT(warehouse_id,item_id) DO UPDATE SET qty=ROUND(qty+excluded.qty, 6)""", (wh_id, item_id, delta))
+    c.execute("UPDATE items SET qty_on_hand=ROUND(qty_on_hand+?, 6) WHERE id=?", (delta, item_id))
+    lots = []
+    if delta < 0:
+        lots = _consume_lots(c, item_id, wh_id, -delta, prefer_lot)
+    elif delta > 0:
+        left = delta
+        if restore:
+            for lid, q in restore:
+                put = min(float(q), left)
+                if put > 1e-9 and c.execute("SELECT 1 FROM stock_lots WHERE id=? AND item_id=? AND warehouse_id=?", (lid, item_id, wh_id)).fetchone():
+                    c.execute("UPDATE stock_lots SET qty_remaining=ROUND(qty_remaining+?, 6) WHERE id=?", (put, lid))
+                    lots.append([lid, rnd(put)])
+                    left -= put
+        elif clone_from:
+            for lid, q in clone_from:
+                row = c.execute("SELECT expiry_date, unit_cost, received_date FROM stock_lots WHERE id=?", (lid,)).fetchone()
+                put = min(float(q), left)
+                if row and put > 1e-9:
+                    nid = c.execute("INSERT INTO stock_lots(client_id,item_id,warehouse_id,qty_remaining,expiry_date,unit_cost,received_date,source_type,source_id) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, rnd(put), row[0], row[1], row[2], "transfer", lid)).lastrowid
+                    lots.append([nid, rnd(put)])
+                    left -= put
+        elif expiry:
+            st, sid = source or (None, None)
+            nid = c.execute("INSERT INTO stock_lots(client_id,item_id,warehouse_id,qty_remaining,expiry_date,unit_cost,received_date,source_type,source_id) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, delta, str(expiry), rnd(unit_cost or 0), str(received) if received else None, st, sid)).lastrowid
+            lots = [[nid, delta]]
+    return lots
 
 
-def move(c, cid, item_id, wh_id, day, mtype, qty, ucost, ref, user) -> None:
-    c.execute("INSERT INTO stock_movements(client_id,item_id,warehouse_id,move_date,move_type,qty,unit_cost,ref_id,created_by) "
-              "VALUES(?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, str(day), mtype, rnd(qty), rnd(ucost), ref, user))
+def move(c, cid, item_id, wh_id, day, mtype, qty, ucost, ref, user, lots=None) -> None:
+    import json
+    c.execute("INSERT INTO stock_movements(client_id,item_id,warehouse_id,move_date,move_type,qty,unit_cost,ref_id,created_by,lots) "
+              "VALUES(?,?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, str(day), mtype, rnd(qty), rnd(ucost), ref, user,
+                                               json.dumps(lots) if lots else None))
+
+
+def adj_move(c, cid, item_id, wh_id, day, mtype, delta, ucost, ref, user, **kw):
+    """تعديل الرصيد + تسجيل الحركة (مع الدفعات التي لُمست) في خطوة واحدة."""
+    lots = adjust(c, cid, item_id, wh_id, delta, **kw)
+    move(c, cid, item_id, wh_id, day, mtype, delta, ucost, ref, user, lots)
+    return lots
+
+
+def lots_of(movement_lots) -> list:
+    import json
+    return json.loads(movement_lots) if movement_lots else []
+
+
+def wac_remove(c, item_id, base_qty, value) -> None:
+    """يسحب قيمة كمية من المتوسط المرجح (إلغاء شراء/مرتجع). يُستدعى قبل تعديل الرصيد."""
+    old_qty, old_avg = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=?", (item_id,)).fetchone()
+    new_qty = old_qty - base_qty
+    avg = old_avg
+    if new_qty > 1e-9:
+        avg = (old_qty * old_avg - value) / new_qty
+        if avg < 0:
+            avg = old_avg
+    c.execute("UPDATE items SET avg_cost=? WHERE id=?", (round(float(avg), 8), item_id))
+
+
+def wac_add(c, item_id, base_qty, value) -> None:
+    old_qty, old_avg = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=?", (item_id,)).fetchone()
+    avg = (old_qty * old_avg + value) / (old_qty + base_qty) if old_qty > 0 else value / base_qty
+    c.execute("UPDATE items SET avg_cost=? WHERE id=?", (round(float(avg), 8), item_id))
 
 
 def unit_table(c, item_id):
@@ -232,6 +318,7 @@ def approve_voucher(cid, voucher_id, user, allow_negative=False):
         if v[0] != "pending":
             raise ValueError("هذا الإذن ليس قيد الاعتماد.")
         status, src, dst, day = v
+        controls.check_open(c, cid, day)
         check_wh(c, cid, src)
         check_wh(c, cid, dst)
         lines = c.execute("""SELECT l.item_id, l.base_qty, i.name, i.avg_cost, i.last_price FROM transfer_lines l
@@ -244,10 +331,8 @@ def approve_voucher(cid, voucher_id, user, allow_negative=False):
         value = 0.0
         for item_id, bq, _, avg, last in lines:
             uc = unit_cost(avg, last)
-            adjust(c, cid, item_id, src, -bq)
-            move(c, cid, item_id, src, day, "transfer_out", -bq, uc, voucher_id, user)
-            adjust(c, cid, item_id, dst, bq)
-            move(c, cid, item_id, dst, day, "transfer_in", bq, uc, voucher_id, user)
+            consumed = adj_move(c, cid, item_id, src, day, "transfer_out", -bq, uc, voucher_id, user)
+            adj_move(c, cid, item_id, dst, day, "transfer_in", bq, uc, voucher_id, user, clone_from=consumed)
             value += bq * uc
         c.execute("UPDATE transfer_vouchers SET status='approved', approved_by=?, approved_at=datetime('now','localtime') WHERE id=?",
                   (user, voucher_id))
@@ -269,7 +354,7 @@ def cancel_voucher(cid, voucher_id, user):
 
 def vouchers(cid, status=None) -> pd.DataFrame:
     df = query("""SELECT v.id, v.voucher_date, w1.name AS from_name, w2.name AS to_name, v.status, v.notes,
-                  v.created_by, v.approved_by, v.approved_at,
+                  v.created_by, v.approved_by, v.approved_at, COALESCE(v.is_voided,0) AS is_voided, v.void_reason,
                   (SELECT COUNT(*) FROM transfer_lines l WHERE l.voucher_id=v.id) AS lines_count
                   FROM transfer_vouchers v JOIN warehouses w1 ON w1.id=v.from_wh JOIN warehouses w2 ON w2.id=v.to_wh
                   WHERE v.client_id=? ORDER BY v.id DESC""", (cid,))
@@ -288,6 +373,7 @@ def apply_stocktake(cid, wh_id, day, counts: dict, user, apply_adjustment: bool)
     """counts = {item_id: actual_qty} لمخزن محدد. عند الاعتماد تُسوّى أرصدة هذا المخزن فقط بحركة adjustment."""
     with tx() as c:
         check_wh(c, cid, wh_id)
+        controls.check_open(c, cid, day)
         tid = c.execute("INSERT INTO stocktakes(client_id,count_date,warehouse_id,created_by) VALUES(?,?,?,?)",
                         (cid, str(day), wh_id, user)).lastrowid
         value_diff = 0.0
@@ -304,8 +390,7 @@ def apply_stocktake(cid, wh_id, day, counts: dict, user, apply_adjustment: bool)
             diff = rnd(float(actual) - system)
             value_diff += diff * uc
             if apply_adjustment and abs(diff) > 1e-9:
-                adjust(c, cid, item_id, wh_id, diff)
-                move(c, cid, item_id, wh_id, day, "adjustment", diff, uc, tid, user)
+                adj_move(c, cid, item_id, wh_id, day, "adjustment", diff, uc, tid, user)
         name = c.execute("SELECT name FROM warehouses WHERE id=?", (wh_id,)).fetchone()[0]
         log(c, user, "create", "stocktake", tid,
             f"جرد {name} " + ("مع تسوية الأرصدة" if apply_adjustment else "بدون تسوية"), abs(value_diff), cid)

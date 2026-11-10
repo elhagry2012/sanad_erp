@@ -36,3 +36,8 @@ Keep the container port private; expose only the proxy.
 - [ ] `.env`, `*.db`, `backups/`, `invoice_images/` not in git/images (see `.gitignore`, `.dockerignore`)
 - [ ] Review `audit_log` and the "Security log" tab regularly
 - [ ] Limit each user's modules/restaurants in "Users & permissions"
+
+## 7. Import / export notes
+- PDF export needs no system packages: ReportLab (pure Python wheel) + the bundled font in `assets/fonts/` (make sure it is deployed with the code).
+- Uploads for bulk import are limited to 5 MB / 5,000 rows, `.xlsx` or `.csv` only; macro workbooks and zip-bombs are rejected.
+- The "Data import" module is sensitive: grant it per user in "Users & permissions". Every import and export is written to `audit_log`.

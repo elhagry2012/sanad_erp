@@ -2,6 +2,7 @@ from datetime import date, timedelta
 import plotly.express as px
 import streamlit as st
 
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, reports
 
 COLORS = {"star": theme.GREEN, "plow": theme.GOLD, "puzzle": "#5B6B8C", "dog": "#B3402F"}
@@ -47,5 +48,9 @@ def render():
         "class": "الفئة", "advice": "التوصية"})
     st.dataframe(show[["الوجبة", "الفئة", "السعر", "التكلفة", "هامش الوحدة", "نسبة التكلفة %", "الكمية", "الشعبية %", "إجمالي الهامش", "التوصية"]].round(2),
                  use_container_width=True, hide_index=True)
-    st.download_button("تنزيل التقرير CSV", show.drop(columns=["dish_id", "class_key", "popular", "profitable", "avg_price", "missing_cost"]).to_csv(index=False).encode("utf-8-sig"),
-                       file_name="menu_engineering.csv", mime="text/csv")
+    _rep = show[["الوجبة", "الفئة", "السعر", "التكلفة", "هامش الوحدة", "نسبة التكلفة %", "الكمية", "الشعبية %", "إجمالي الهامش", "التوصية"]]
+    _cls = df.groupby("class", as_index=False).agg(الوجبات=("dish_id", "count"), الكمية=("qty", "sum"), إجمالي_الهامش=("total_cm", "sum")).rename(columns={"class": "الفئة", "إجمالي_الهامش": "إجمالي الهامش"})
+    export_buttons(sections=[Section("تصنيف الوجبات", _rep, {"السعر": FMT_MONEY, "التكلفة": FMT_MONEY, "هامش الوحدة": FMT_MONEY, "نسبة التكلفة %": "0.0", "الكمية": FMT_QTY, "الشعبية %": "0.0", "إجمالي الهامش": FMT_MONEY},
+                             note=f"حد الشعبية {meta['pop_threshold']:.1f}% — حد الهامش {meta['cm_threshold']:,.2f}"),
+                   Section("ملخص الفئات", _cls, {"الكمية": FMT_QTY, "إجمالي الهامش": FMT_MONEY}, ["الوجبات", "الكمية", "إجمالي الهامش"])],
+                   title="تقرير هندسة القائمة", filename="menu_engineering", subtitle=f"{auth.client_name()} — من {f} إلى {t}", key="menu_exp")

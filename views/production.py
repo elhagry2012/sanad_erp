@@ -3,7 +3,8 @@ import pandas as pd
 import streamlit as st
 
 from database.db import query
-from utils import theme, auth, services, reports
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
+from utils import theme, auth, services, reports, documents, controls
 from utils.costing import dish_costs
 
 
@@ -86,6 +87,32 @@ def render():
                               b.total_cost/b.output_qty AS "تكلفة الوحدة", b.created_by AS "المستخدم" FROM production_batches b
                               JOIN recipes r ON r.id=b.recipe_id WHERE b.client_id=? ORDER BY b.batch_date DESC, b.id DESC""", (cid,)).round(4),
                      use_container_width=True, hide_index=True)
+        bl = query("""SELECT b.id, b.batch_date, r.name, COALESCE(b.is_voided,0) AS v FROM production_batches b
+                      JOIN recipes r ON r.id=b.recipe_id WHERE b.client_id=? ORDER BY b.id DESC LIMIT 50""", (cid,))
+        if not bl.empty:
+            bmap = {f"#{r['id']} — {r['batch_date']} — {r['name']}" + (" (معكوسة)" if r["v"] else ""): (int(r["id"]), bool(r["v"])) for _, r in bl.iterrows()}
+            bsel = st.selectbox("تشغيلة للإلغاء أو طلب التعديل", list(bmap), key="batch_pick")
+            bid, bvoid = bmap[bsel]
+            if not bvoid:
+                if auth.is_admin():
+                    with st.expander("🛠 أدوات المدير العام: إلغاء هذه التشغيلة"):
+                        br = st.text_input("سبب الإلغاء", key=f"bvr_{bid}")
+                        bneg = st.checkbox("السماح بالرصيد السالب", key=f"bvn_{bid}")
+                        if st.button("🗑 إلغاء التشغيلة (تعود الخامات ويُسحب الناتج)", key=f"bvb_{bid}"):
+                            try:
+                                documents.void_batch(cid, bid, br, user, bneg)
+                                st.rerun()
+                            except ValueError as ex:
+                                st.error(str(ex))
+                else:
+                    with st.expander("✉️ طلب تعديل/إلغاء هذه التشغيلة"):
+                        rr = st.text_area("السبب", key=f"bvq_{bid}")
+                        if st.button("إرسال الطلب", key=f"bvqb_{bid}"):
+                            try:
+                                controls.create_edit_request(cid, "production_batch", bid, rr, "", user)
+                                st.success("تم إرسال الطلب للمدير العام.")
+                            except ValueError as ex:
+                                st.error(str(ex))
 
     with t3:
         if items.empty:
@@ -122,9 +149,10 @@ def render():
         else:
             dc["الهامش"] = dc["price"] - dc["cost"]
             dc["نسبة التكلفة %"] = (dc["cost"] / dc["price"] * 100).round(1)
-            st.dataframe(dc.rename(columns={"name": "الوجبة", "category": "التصنيف", "price": "السعر", "cost": "التكلفة",
-                                            "missing_cost": "مكونات بلا تكلفة"}).drop(columns="dish_id").round(2),
-                         use_container_width=True, hide_index=True)
+            _tbl15 = dc.rename(columns={"name": "الوجبة", "category": "التصنيف", "price": "السعر", "cost": "التكلفة",
+                                            "missing_cost": "مكونات بلا تكلفة"}).drop(columns="dish_id")
+            st.dataframe(_tbl15.round(2), use_container_width=True, hide_index=True)
+            export_buttons(_tbl15, "تكلفة الوجبات وهامشها", "dish_costs", subtitle=auth.client_name(), formats={"السعر": FMT_MONEY, "التكلفة": FMT_MONEY, "الهامش": FMT_MONEY, "نسبة التكلفة %": "0.0"}, key="prod_dc")
             pick = st.selectbox("تفصيل مكونات وجبة", dc["name"])
             st.dataframe(query("""SELECT i.name AS "المكوّن", COALESCE(rl.entered_qty, rl.qty) AS "الكمية",
                                   COALESCE(rl.entered_unit, i.unit) AS "الوحدة", rl.qty AS "بوحدة الاستهلاك", i.unit AS "وحدة الاستهلاك",
@@ -182,4 +210,6 @@ def render():
                 m = st.columns(2)
                 m[0].metric("التكلفة التقديرية", f"{plan['التكلفة التقديرية'].sum():,.2f}")
                 m[1].metric("أصناف بها عجز", int((plan["العجز"] > 0).sum()))
-                st.dataframe(plan, use_container_width=True, hide_index=True)
+                _tbl14 = plan
+                st.dataframe(_tbl14, use_container_width=True, hide_index=True)
+                export_buttons(_tbl14, "تخطيط احتياجات الخامات (تفجير الوصفة)", "recipe_explosion", subtitle=f"{auth.client_name()} — {pick} × {qty:g}", formats={"الاحتياج": FMT_QTY, "المتاح": FMT_QTY, "العجز": FMT_QTY, "التكلفة التقديرية": FMT_MONEY}, totals=["التكلفة التقديرية"], key="prod_plan")

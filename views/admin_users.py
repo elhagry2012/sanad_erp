@@ -28,8 +28,9 @@ def render():
         show["الدور"] = show["role"].map({"admin": "مدير عام", "partner": "شريك / موظف"})
         show["الحالة"] = show["is_active"].map({1: "مفعّل", 0: "معطّل"})
         show["الوصول"] = show.apply(_access_summary, axis=1)
+        show["الدور الوظيفي"] = show["job_role"].map(lambda k: security.ROLE_PRESETS.get(k, {}).get("label", "—"))
         show["تغيير إجباري"] = show["must_change_password"].map({1: "نعم", 0: ""})
-        st.dataframe(show[["username", "full_name", "الدور", "الحالة", "الوصول", "تغيير إجباري", "password_changed_at",
+        st.dataframe(show[["username", "full_name", "الدور", "الدور الوظيفي", "الحالة", "الوصول", "تغيير إجباري", "password_changed_at",
                            "last_login_at", "created_by"]].rename(columns={
             "username": "المستخدم", "full_name": "الاسم", "password_changed_at": "آخر تغيير لكلمة المرور",
             "last_login_at": "آخر دخول", "created_by": "أنشأه"}), use_container_width=True, hide_index=True)
@@ -42,11 +43,14 @@ def render():
             full = c2.text_input("الاسم الكامل")
             gen = st.checkbox("توليد كلمة مرور مؤقتة تلقائيًا (موصى به)", value=True)
             pw = st.text_input("أو أدخل كلمة مرور ابتدائية", type="password")
+            role_labels = {k: v["label"] for k, v in security.ROLE_PRESETS.items()}
+            role_key = st.selectbox("الدور الوظيفي (يحدد الشاشات والتقارير الظاهرة، ويمكنك تعديلها بعد الإنشاء)", [None] + list(role_labels),
+                                    format_func=lambda k: "— بدون دور: وصول كامل أقيّده لاحقًا —" if k is None else role_labels[k])
             st.caption("الحساب الجديد يبدأ بوصول كامل (كالسابق)، وتقيّده من تبويب «الصلاحيات والمطاعم». سيُطلب من المستخدم تغيير كلمة المرور عند أول دخول.")
             if st.form_submit_button("إنشاء الحساب"):
                 try:
                     password = security.generate_password() if (gen or not pw) else pw
-                    security.create_user(uname, full, password, me)
+                    security.create_user(uname, full, password, me, role=role_key)
                     st.session_state["new_user_pw"] = (uname.strip().lower(), password)
                     st.rerun()
                 except ValueError as e:
@@ -65,16 +69,29 @@ def render():
             target = st.selectbox("الحساب", others["username"], key="perm_user")
             row = others[others["username"] == target].iloc[0]
             acc = security.get_access(target)
+            cur_role = row.get("job_role")
+            st.markdown(f"**الدور الحالي:** {security.ROLE_PRESETS.get(cur_role, {}).get('label', 'غير محدد (مخصص)')}")
+            rc1, rc2 = st.columns([2, 1])
+            new_role = rc1.selectbox("تطبيق دور جاهز (يستبدل صلاحيات الوحدات، ولا يغيّر المطاعم المسموحة)", list(security.ROLE_PRESETS),
+                                     format_func=lambda k: security.ROLE_PRESETS[k]["label"], key=f"role_{target}")
+            if rc2.button("تطبيق الدور", key=f"role_btn_{target}"):
+                security.apply_role(target, new_role, me)
+                st.success("تم تطبيق الدور.")
+                st.rerun()
+            st.caption("الأدوار: كاشير (مبيعات فقط)، مدير مطعم (التشغيل + تقارير المخزون والإدارة)، مدير مالي (الخزينة والمصروفات + التقارير المالية والضريبية)، مدير عام غير Admin (كل الوحدات عدا الاستيراد).")
             st.markdown("**الوحدات المسموحة**")
             all_m = st.checkbox("كل الوحدات (عرض وتعديل)", value=bool(row["all_modules"]), key=f"allm_{target}")
             grid = pd.DataFrame([{"الوحدة": name, "key": k,
                                   "عرض": acc["all_modules"] or acc["modules"].get(k, (False, False))[0],
                                   "تعديل": acc["all_modules"] or acc["modules"].get(k, (False, False))[1]}
-                                 for k, name in security.MODULES.items()])
+                                 for k, name in security.MODULES.items() if k not in security.SENSITIVE_MODULES])
             ed = st.data_editor(grid, hide_index=True, use_container_width=True, disabled=all_m or ["الوحدة", "key"],
                                 column_config={"key": None, "عرض": st.column_config.CheckboxColumn(),
                                                "تعديل": st.column_config.CheckboxColumn()}, key=f"permgrid_{target}")
             st.caption("«تعديل» يتضمن «عرض». وحدة بدون عرض لا تظهر للمستخدم أصلًا، وتُرفض عملياتها في الخدمات أيضًا.")
+            imp_now = acc["explicit"].get("import", (False, False))[1]
+            imp_on = st.checkbox("السماح بوحدة «الاستيراد الجماعي للبيانات» (حساسة: لا تشملها «كل الوحدات»، تُمنح بالاسم فقط)",
+                                 value=imp_now, key=f"imp_{target}")
             st.markdown("**المطاعم المسموحة**")
             all_c = st.checkbox("كل المطاعم", value=bool(row["all_clients"]), key=f"allc_{target}")
             names = list(clients["name"])
@@ -82,6 +99,7 @@ def render():
             chosen = st.multiselect("اختر المطاعم", names, default=default, disabled=all_c, key=f"cl_{target}")
             if st.button("حفظ الصلاحيات", type="primary"):
                 modules = {r["key"]: (bool(r["عرض"]) or bool(r["تعديل"]), bool(r["تعديل"])) for _, r in ed.iterrows()}
+                modules["import"] = (imp_on, imp_on)
                 ids = [int(clients.loc[clients["name"] == n, "id"].iloc[0]) for n in chosen]
                 if not all_c and not ids:
                     st.error("اختر مطعمًا واحدًا على الأقل، أو فعّل «كل المطاعم».")

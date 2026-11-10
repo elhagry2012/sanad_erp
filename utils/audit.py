@@ -6,12 +6,12 @@ ENTITY_AR = {
     "supplier_payment": "دفعة مورد", "recipe": "وصفة", "dish": "وجبة",
     "production_batch": "تشغيلة إنتاج", "sale": "مبيعات كاشير", "waste": "هالك",
     "expense": "مصروف", "expense_category": "بند مصروف", "stocktake": "جرد",
-    "client": "عميل", "treasury": "حركة خزينة", "warehouse": "مخزن", "transfer": "إذن تحويل", "permission": "صلاحيات", "user": "مستخدم", "session": "جلسة دخول",
+    "client": "عميل", "treasury": "حركة خزينة", "warehouse": "مخزن", "import": "استيراد جماعي", "edit_request": "طلب تعديل", "purchase_return": "مرتجع مشتريات", "period": "إقفال فترة", "settings": "إعدادات", "export": "تصدير بيانات", "transfer": "إذن تحويل", "permission": "صلاحيات", "user": "مستخدم", "session": "جلسة دخول",
 }
 ACTION_AR = {
     "create": "إضافة", "update": "تعديل", "delete": "حذف",
     "login": "دخول", "logout": "خروج", "login_failed": "محاولة دخول فاشلة",
-    "access_denied": "محاولة غير مصرح بها", "approve": "اعتماد", "cancel": "إلغاء",
+    "access_denied": "محاولة غير مصرح بها", "approve": "اعتماد", "reject": "رفض", "void": "إلغاء مستند", "lock": "إقفال فترة", "unlock": "فتح فترة", "export": "تصدير", "import": "استيراد", "cancel": "إلغاء",
 }
 
 

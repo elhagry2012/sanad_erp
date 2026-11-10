@@ -4,6 +4,7 @@ import plotly.express as px
 import streamlit as st
 
 from database.db import query
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth
 from utils.audit import ENTITY_AR, ACTION_AR
 
@@ -71,5 +72,4 @@ def render():
     show = det[["ts", "username", "العملية", "النوع", "entity_id", "details", "amount"]].rename(columns={
         "ts": "الوقت", "username": "المستخدم", "entity_id": "رقم السجل", "details": "التفاصيل", "amount": "القيمة"})
     st.dataframe(show, use_container_width=True, hide_index=True)
-    st.download_button("تنزيل السجل CSV", show.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="audit_log.csv", mime="text/csv")
+    export_buttons(show, "سجل عمليات المستخدمين (Audit Trail)", "audit_trail", subtitle=f"من {start} إلى {end}", formats={"القيمة": FMT_MONEY}, key="audit_exp")

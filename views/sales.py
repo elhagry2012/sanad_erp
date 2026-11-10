@@ -5,6 +5,7 @@ import plotly.express as px
 import streamlit as st
 
 from database.db import query
+from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
 from utils import theme, auth, services, reports, treasury
 
 PAY_OPTS = {"cash": "💵 نقدي", "bank": "🏦 بنك / فيزا", "split": "مختلط (نقدي + بنك)", "none": "بدون تحصيل الآن (آجل)"}
@@ -102,7 +103,9 @@ def render():
                        WHERE s.client_id=? AND s.sale_date BETWEEN ? AND ? ORDER BY s.sale_date DESC, s.id DESC""",
                     (cid, str(f), str(t)))
         log["القناة"] = log["ch"].map(services.CHANNELS).fillna("غير محدد")
-        st.dataframe(log.drop(columns="ch"), use_container_width=True, hide_index=True, column_config={"id": "رقم"})
+        _tbl12 = log.drop(columns="ch")
+        st.dataframe(_tbl12, use_container_width=True, hide_index=True, column_config={"id": "رقم"})
+        export_buttons(_tbl12.rename(columns={"id": "رقم"}), "سجل مبيعات الكاشير", "sales_log", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "السعر": FMT_MONEY, "الإيراد": FMT_MONEY, "نقدي": FMT_MONEY, "بنك": FMT_MONEY}, totals=["الإيراد", "نقدي", "بنك"], key="sales_log")
         if not log.empty:
             st.metric("إيراد الفترة", f"{log['الإيراد'].sum():,.0f}")
             c1, c2 = st.columns([2, 1])
@@ -131,5 +134,6 @@ def render():
                            use_container_width=True)
             r.plotly_chart(theme.style_fig(px.bar(by, x="القناة", y="revenue", title="الإيراد حسب القناة", labels={"revenue": "الإيراد"})),
                            use_container_width=True)
-            st.dataframe(ch[["القناة", "التطبيق", "qty", "revenue", "الحصة %"]].rename(columns={"qty": "الكمية", "revenue": "الإيراد"}).round(1),
-                         use_container_width=True, hide_index=True)
+            _tbl11 = ch[["القناة", "التطبيق", "qty", "revenue", "الحصة %"]].rename(columns={"qty": "الكمية", "revenue": "الإيراد"})
+            st.dataframe(_tbl11.round(1), use_container_width=True, hide_index=True)
+            export_buttons(_tbl11, "تحليل المبيعات حسب قناة الطلب", "sales_channels", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "الإيراد": FMT_MONEY, "الحصة %": "0.0"}, totals=["الكمية", "الإيراد"], key="sales_ch")

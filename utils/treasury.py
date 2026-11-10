@@ -4,6 +4,7 @@ import pandas as pd
 from database.db import tx, query
 from utils.audit import log
 from utils.security import guard
+from utils import controls
 
 SOURCE_AR = {"manual": "قيد يدوي", "purchase_invoice": "فاتورة شراء", "supplier_payment": "دفعة مورد",
              "expense": "مصروف", "sale_batch": "مبيعات", "cash_bank_transfer": "تحويل خزينة/بنك"}
@@ -108,9 +109,12 @@ def add_manual(cid, day, direction, amount, category, note, user, account="cash"
     if amount <= 0:
         raise ValueError("المبلغ يجب أن يكون أكبر من صفر.")
     with tx() as c:
+        controls.check_open(c, cid, day)
         tid = post(c, cid, day, direction, amount, category, note, "manual", None, user, account)
         log(c, user, "create", "treasury", tid,
             f"{ACCOUNT_AR[account]}: {'إيداع' if direction == 'in' else 'سحب'} يدوي - {category}", amount, cid)
+        if direction == "out":
+            controls.notify_if_large(c, cid, "thr_treasury_out", amount, f"سحب من {ACCOUNT_AR[account]}", user)
     return tid
 
 
