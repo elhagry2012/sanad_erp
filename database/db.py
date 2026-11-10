@@ -340,6 +340,40 @@ def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     
+    # التأكد من إنشاء الجداول الأساسية لو مش موجودة
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id TEXT,
+            supplier_id TEXT,
+            invoice_no TEXT,
+            invoice_date TEXT,
+            total REAL,
+            subtotal REAL,
+            vat_rate REAL,
+            vat REAL,
+            wht_rate REAL,
+            saved_image TEXT,
+            wh TEXT,
+            pay_method TEXT,
+            created_by TEXT,
+            replaces_id INTEGER
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER,
+            item_id TEXT,
+            qty REAL,
+            unit_price REAL,
+            unit_name TEXT,
+            unit_factor REAL,
+            expiry_date TEXT
+        )
+    """)
+    
     def add_column_if_not_exists(table_name, column_name, column_definition):
         try:
             cursor.execute(f"PRAGMA table_info({table_name})")
@@ -361,9 +395,16 @@ def init_db():
     add_column_if_not_exists("purchase_invoices", "pay_method", "TEXT")
     add_column_if_not_exists("purchase_invoices", "created_by", "TEXT")
     add_column_if_not_exists("purchase_invoices", "replaces_id", "INTEGER")
+    
+    # أعمدة purchase_lines لو متطلبة
+    add_column_if_not_exists("purchase_lines", "unit_name", "TEXT")
+    add_column_if_not_exists("purchase_lines", "unit_factor", "REAL")
+    add_column_if_not_exists("purchase_lines", "expiry_date", "TEXT")
+
     add_column_if_not_exists("stock_movements", "lots", "TEXT")
     add_column_if_not_exists("production_batches", "is_voided", "INTEGER DEFAULT 0")
     add_column_if_not_exists("transfer_vouchers", "is_voided", "INTEGER DEFAULT 0")
     add_column_if_not_exists("transfer_vouchers", "void_reason", "TEXT")
     
+    conn.commit()
     conn.close()
