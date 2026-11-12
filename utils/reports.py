@@ -404,8 +404,32 @@ def lots_df(cid, warehouse_id=None) -> pd.DataFrame:
     df = query(sql + " ORDER BY (l.expiry_date IS NULL), l.expiry_date, i.name", tuple(params))
     if not df.empty:
         today = date.today()
-        df["أيام للانتهاء"] = df["تاريخ الصلاحية"].map(lambda d: (date.fromisoformat(d) - today).days if d else None)
+        df["أيام للانتهاء"] = df["تاريخ الصلاحية"].map(lambda d: _days_until(d, today))
     return df
+
+
+def _days_until(value, today):
+    """أيام متبقية حتى تاريخ الصلاحية، أو None إن كان التاريخ فارغًا/مفقودًا/غير صالح.
+
+    يقبل: نص YYYY-MM-DD (ومعه وقت اختياري، أو بفواصل /)، أو كائن date/datetime/Timestamp.
+    None/NaN/''/نص غير صالح ⇒ None (وليس 0، لأن 0 تعني «ينتهي اليوم» فتظهر في التنبيهات خطأً).
+    """
+    try:
+        if pd.isna(value):                                                      # None / NaN / NaT
+            return None
+    except (TypeError, ValueError):                                             # قيم غير مفردة: تُعامل كنص أدناه
+        pass
+    if hasattr(value, "date") and callable(value.date):                           # datetime / pandas Timestamp
+        value = value.date()
+    if isinstance(value, date):
+        return (value - today).days
+    s = str(value).strip()[:10].replace("/", "-")
+    if not s:
+        return None
+    try:
+        return (date.fromisoformat(s) - today).days
+    except ValueError:
+        return None
 
 
 def _policy(cid) -> str:
