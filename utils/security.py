@@ -6,6 +6,7 @@
 - الصلاحيات: تُفرض داخل طبقة الخدمات (guard) وليس فقط بإخفاء الصفحات، وكل رفض يُسجَّل.
 """
 import functools
+from pathlib import Path
 import hashlib
 import hmac
 import inspect
@@ -57,8 +58,10 @@ ROLE_PRESETS = {
         "rep_inventory": (_T, _F)}},
     "general_manager": {"label": "مدير عام (غير Admin)", "all": True, "modules": {}},
 }
-# وحدات حساسة: لا تشملها خاصية «كل الوحدات»؛ تُمنح بالاسم فقط (المدير العام يملكها دائمًا)
-SENSITIVE_MODULES = {"import"}
+# وحدات إدارية للمدير العام وحده: لا تُمنح لأي مستخدم آخر بأي صلاحية (ولا تشملها «كل الوحدات»)،
+# وأي منح قديم لها في user_permissions يُتجاهل. النسخ الاحتياطي وتنزيل القاعدة كذلك (backup_now / backup_snapshot).
+ADMIN_ONLY_MODULES = {"import"}
+SENSITIVE_MODULES = ADMIN_ONLY_MODULES                    # الاسم القديم (للتوافق)
 
 
 class PermissionDenied(ValueError):
@@ -298,8 +301,8 @@ def module_access(a: dict, module: str) -> tuple[bool, bool]:
     """(عرض، تعديل) لوحدة معيّنة مع مراعاة الوحدات الحساسة."""
     if a["admin"]:
         return True, True
-    if module in SENSITIVE_MODULES:
-        return a["explicit"].get(module, (False, False))
+    if module in ADMIN_ONLY_MODULES:
+        return False, False
     if a["all_modules"]:
         return True, True
     return a["modules"].get(module, (False, False))
@@ -385,7 +388,7 @@ def _apply_modules(c, uid, all_modules, modules):
     c.execute("UPDATE users SET all_modules=? WHERE id=?", (1 if all_modules else 0, uid))
     c.execute("DELETE FROM user_permissions WHERE user_id=?", (uid,))
     for m, (v, e) in (modules or {}).items():
-        if m in MODULES and (not all_modules or m in SENSITIVE_MODULES):
+        if m in MODULES and m not in ADMIN_ONLY_MODULES and not all_modules:
             c.execute("INSERT INTO user_permissions(user_id,module,can_view,can_edit) VALUES(?,?,?,?)",
                       (uid, m, 1 if (v or e) else 0, 1 if e else 0))
 
@@ -526,3 +529,45 @@ def change_own_password(username: str, old: str, new: str, keep_token: str | Non
                   (hash_password(new), _now(), row[0]))
         _revoke_user(c, row[0], _sha(keep_token) if keep_token else None)
         log(c, username, "update", "user", row[0], "تغيير كلمة المرور")
+
+
+# ================================================================= النسخ الاحتياطي (المدير العام فقط)
+def backup_now(by: str):
+    """نسخة احتياطية فورية في مجلد النسخ. للمدير العام فقط، وتُسجَّل في سجل الأمان."""
+    from database import db
+    _require_admin(by)
+    path = db.backup_db(force=True)
+    with tx() as c:
+        log(c, by, "create", "backup", None, f"نسخة احتياطية يدوية: {path.name if path else '—'}")
+    return path
+
+
+def backup_snapshot(by: str) -> tuple[bytes, str]:
+    """لقطة متسقة من قاعدة البيانات للتنزيل (عبر SQLite backup API، لا ملف القاعدة الحي أثناء الكتابة).
+
+    للمدير العام فقط؛ أي محاولة من غيره تُرفض وتُسجَّل كمحاولة غير مصرح بها.
+    """
+    import sqlite3
+    import tempfile
+    from datetime import datetime
+    from database import db
+    _require_admin(by)
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "snapshot.db"
+        src, dst = db.get_conn(), sqlite3.connect(target)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        data = target.read_bytes()
+    name = f"sanad_backup_{datetime.now():%Y%m%d_%H%M%S}.db"
+    with tx() as c:
+        log(c, by, "export", "backup", None, f"تجهيز نسخة قاعدة البيانات للتنزيل: {name} ({len(data) // 1024} KB)")
+    return data, name
+
+
+def log_backup_download(by: str, name: str) -> None:
+    _require_admin(by)
+    with tx() as c:
+        log(c, by, "export", "backup", None, f"تنزيل نسخة قاعدة البيانات: {name}")

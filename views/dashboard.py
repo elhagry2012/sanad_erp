@@ -75,9 +75,14 @@ def _expiry_panel(cid):
     """تنبيه حي بالأصناف التي قاربت صلاحيتها (أسبوعان) + ملخص الراكد."""
     ex = reports.expiring_lots(cid, 14)
     dead = reports.dead_stock(cid, 90)
-    if ex.empty and dead.empty:
+    risk = reports.expiry_risk(cid, 30)
+    at = risk[risk["معرّض للتلف"] > 1e-9] if not risk.empty else risk
+    if ex.empty and dead.empty and at.empty:
         return
     st.subheader("⏳ تنبيهات الصلاحية والركود")
+    if not at.empty:
+        st.warning(f"📉 {len(at)} دفعة لن تُستهلك بالكامل قبل انتهاء صلاحيتها بمعدل استهلاك آخر 30 يومًا وحسب ترتيب الصرف — "
+                   f"قيمة المعرّض للتلف {at['قيمة المعرّض للتلف'].sum():,.2f}. التفاصيل: المخزن ← الدفعات والصلاحية.")
     if not ex.empty:
         m = st.columns(3)
         m[0].metric("🔴 منتهية الصلاحية", int((ex["days_left"] < 0).sum()))

@@ -6,6 +6,8 @@
   يحرّك الكمية بنفس التكلفة ولا يغيّر قيمة المخزون الإجمالية.
 - التقريب: 6 منازل عشرية، وتُرفض الكميات الكسرية للأصناف غير القابلة للتجزئة (قطعة/علبة...).
 """
+from datetime import datetime
+
 import pandas as pd
 
 from database.db import tx, query
@@ -55,16 +57,34 @@ def wh_qty(c, wh_id, item_id) -> float:
     return float(r[0]) if r else 0.0
 
 
-def _consume_lots(c, item_id, wh_id, qty, prefer=None):
-    """يخصم من الدفعات بنظام FEFO (الأقرب انتهاءً أولًا، والبدون صلاحية آخرًا). prefer = دفعة تُستهلك أولًا."""
+ISSUE_POLICIES = {"fefo": "الأقرب انتهاءً أولًا (FEFO) — ثم الأقدم استلامًا", "fifo": "الأقدم استلامًا أولًا (FIFO)"}
+# ترتيب الصرف: الدفعات بلا تاريخ صلاحية تأتي آخرًا في FEFO، والدفعات بلا تاريخ استلام (أرصدة افتتاحية قديمة) أقدم شيء في FIFO.
+ISSUE_ORDER = {"fefo": "(expiry_date IS NULL), expiry_date, COALESCE(received_date,''), id",
+               "fifo": "COALESCE(received_date,''), id"}
+
+
+def issue_policy(c, cid) -> str:
+    r = c.execute("SELECT value FROM client_settings WHERE client_id=? AND key='issue_policy'", (cid,)).fetchone()
+    return r[0] if r and r[0] in ISSUE_POLICIES else "fefo"
+
+
+def lots_sum(c, item_id, wh_id) -> float:
+    r = c.execute("SELECT COALESCE(SUM(qty_remaining),0) FROM stock_lots WHERE item_id=? AND warehouse_id=? AND qty_remaining>0",
+                  (item_id, wh_id)).fetchone()
+    return float(r[0] or 0)
+
+
+def _consume_lots(c, cid, item_id, wh_id, qty, prefer=None):
+    """يخصم من الدفعات حسب سياسة صرف المطعم (FEFO افتراضيًا أو FIFO). prefer = دفعة تُستهلك أولًا (مرتجع على فاتورة)."""
     need, out, rows = float(qty), [], []
     if prefer:
         r = c.execute("SELECT id, qty_remaining FROM stock_lots WHERE id=? AND item_id=? AND warehouse_id=? AND qty_remaining>0.000000001",
                       (prefer, item_id, wh_id)).fetchone()
         if r:
             rows.append(r)
+    order = ISSUE_ORDER[issue_policy(c, cid)]
     rows += [r for r in c.execute("SELECT id, qty_remaining FROM stock_lots WHERE item_id=? AND warehouse_id=? AND qty_remaining>0.000000001 "
-                                  "ORDER BY (expiry_date IS NULL), expiry_date, id", (item_id, wh_id)).fetchall()
+                                  f"ORDER BY {order}", (item_id, wh_id)).fetchall()
              if not prefer or r[0] != prefer]
     for lot_id, rem in rows:
         if need <= 1e-9:
@@ -76,12 +96,22 @@ def _consume_lots(c, item_id, wh_id, qty, prefer=None):
     return out
 
 
+def _new_lot(c, cid, item_id, wh_id, qty, expiry, unit_cost, received, source):
+    st_, sid = source or (None, None)
+    return c.execute("INSERT INTO stock_lots(client_id,item_id,warehouse_id,qty_initial,qty_remaining,expiry_date,unit_cost,received_date,"
+                     "source_type,source_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (cid, item_id, wh_id, rnd(qty), rnd(qty), str(expiry) if expiry else None, rnd(unit_cost or 0),
+                      str(received)[:10] if received else None, st_, sid)).lastrowid
+
+
 def adjust(c, cid, item_id, wh_id, delta, *, expiry=None, unit_cost=None, received=None, source=None,
            restore=None, clone_from=None, prefer_lot=None):
     """يغيّر رصيد صنف في مخزن محدد، ويحدّث الرصيد الإجمالي items.qty_on_hand معه (متسقان دائمًا).
 
-    الدفعات: الصرف يخصم FEFO (أو prefer_lot أولًا) ويرجع قائمة [[lot_id, qty]]؛
-    الدخول يُنشئ دفعة إن وُجد expiry، أو يعيد كميات لدفعات سابقة (restore)، أو ينسخ دفعات من مخزن آخر (clone_from).
+    كل المخزون مُدار بالدفعات، مع ثابت: مجموع أرصدة دفعات (الصنف، المخزن) = رصيد المخزن إن كان موجبًا (وصفر إن كان سالبًا).
+    - الصرف يخصم حسب سياسة الصرف (أو prefer_lot أولًا) ويرجع [[lot_id, qty]].
+    - الدخول يعيد الكميات لدفعاتها السابقة (restore) أو ينسخ دفعات مخزن آخر (clone_from)، وأي باقٍ يُنشئ دفعة جديدة
+      بتاريخ الصلاحية المُعطى (أو بدون تاريخ). الجزء الذي يسدّ رصيدًا سالبًا لا يُنشئ دفعة.
     """
     if not c.execute("SELECT 1 FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone():
         raise ValueError("صنف غير موجود لهذا المطعم.")
@@ -91,30 +121,26 @@ def adjust(c, cid, item_id, wh_id, delta, *, expiry=None, unit_cost=None, receiv
     c.execute("UPDATE items SET qty_on_hand=ROUND(qty_on_hand+?, 6) WHERE id=?", (delta, item_id))
     lots = []
     if delta < 0:
-        lots = _consume_lots(c, item_id, wh_id, -delta, prefer_lot)
+        lots = _consume_lots(c, cid, item_id, wh_id, -delta, prefer_lot)
     elif delta > 0:
-        left = delta
-        if restore:
-            for lid, q in restore:
-                put = min(float(q), left)
-                if put > 1e-9 and c.execute("SELECT 1 FROM stock_lots WHERE id=? AND item_id=? AND warehouse_id=?", (lid, item_id, wh_id)).fetchone():
-                    c.execute("UPDATE stock_lots SET qty_remaining=ROUND(qty_remaining+?, 6) WHERE id=?", (put, lid))
-                    lots.append([lid, rnd(put)])
-                    left -= put
-        elif clone_from:
-            for lid, q in clone_from:
-                row = c.execute("SELECT expiry_date, unit_cost, received_date FROM stock_lots WHERE id=?", (lid,)).fetchone()
-                put = min(float(q), left)
-                if row and put > 1e-9:
-                    nid = c.execute("INSERT INTO stock_lots(client_id,item_id,warehouse_id,qty_remaining,expiry_date,unit_cost,received_date,source_type,source_id) "
-                                    "VALUES(?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, rnd(put), row[0], row[1], row[2], "transfer", lid)).lastrowid
-                    lots.append([nid, rnd(put)])
-                    left -= put
-        elif expiry:
-            st, sid = source or (None, None)
-            nid = c.execute("INSERT INTO stock_lots(client_id,item_id,warehouse_id,qty_remaining,expiry_date,unit_cost,received_date,source_type,source_id) "
-                            "VALUES(?,?,?,?,?,?,?,?,?)", (cid, item_id, wh_id, delta, str(expiry), rnd(unit_cost or 0), str(received) if received else None, st, sid)).lastrowid
-            lots = [[nid, delta]]
+        room = wh_qty(c, wh_id, item_id) - lots_sum(c, item_id, wh_id)
+        left = rnd(min(delta, max(room, 0.0)))
+        for lid, q in (restore or []):
+            put = min(float(q), left)
+            if put > 1e-9 and c.execute("SELECT 1 FROM stock_lots WHERE id=? AND item_id=? AND warehouse_id=?", (lid, item_id, wh_id)).fetchone():
+                c.execute("UPDATE stock_lots SET qty_remaining=ROUND(qty_remaining+?, 6) WHERE id=?", (put, lid))
+                lots.append([lid, rnd(put)])
+                left -= put
+        for lid, q in (clone_from or []):
+            row = c.execute("SELECT expiry_date, unit_cost, received_date FROM stock_lots WHERE id=?", (lid,)).fetchone()
+            put = min(float(q), left)
+            if row and put > 1e-9:
+                nid = _new_lot(c, cid, item_id, wh_id, put, row[0], row[1], row[2], ("transfer", lid))
+                lots.append([nid, rnd(put)])
+                left -= put
+        if left > 1e-9:
+            nid = _new_lot(c, cid, item_id, wh_id, left, expiry, unit_cost, received or datetime.now().date(), source)
+            lots.append([nid, rnd(left)])
     return lots
 
 
@@ -126,10 +152,31 @@ def move(c, cid, item_id, wh_id, day, mtype, qty, ucost, ref, user, lots=None) -
 
 
 def adj_move(c, cid, item_id, wh_id, day, mtype, delta, ucost, ref, user, **kw):
-    """تعديل الرصيد + تسجيل الحركة (مع الدفعات التي لُمست) في خطوة واحدة."""
+    """تعديل الرصيد + تسجيل الحركة (مع الدفعات التي لُمست) في خطوة واحدة. الدفعة الجديدة (إن نشأت) تأخذ تكلفة الحركة وتاريخها."""
+    kw.setdefault("unit_cost", ucost)
+    kw.setdefault("received", day)
+    kw.setdefault("source", (mtype, ref))
     lots = adjust(c, cid, item_id, wh_id, delta, **kw)
     move(c, cid, item_id, wh_id, day, mtype, delta, ucost, ref, user, lots)
     return lots
+
+
+def backfill_lots(conn) -> int:
+    """يحوّل الأرصدة الموجودة خارج الدفعات (مخزون قديم، أو حركات بلا تاريخ صلاحية قبل هذا الإصدار) إلى دفعات افتتاحية بلا تاريخ.
+
+    آمن للتكرار: يُنشئ فقط الفرق الموجب بين رصيد المخزن ومجموع دفعاته.
+    """
+    rows = conn.execute("""SELECT s.warehouse_id, s.item_id, w.client_id, s.qty - COALESCE((SELECT SUM(l.qty_remaining) FROM stock_lots l
+                              WHERE l.item_id=s.item_id AND l.warehouse_id=s.warehouse_id AND l.qty_remaining>0),0) AS gap,
+                              CASE WHEN i.avg_cost>0 THEN i.avg_cost ELSE COALESCE(i.last_price,0) END
+                           FROM warehouse_stock s JOIN warehouses w ON w.id=s.warehouse_id JOIN items i ON i.id=s.item_id
+                           WHERE s.qty > 0""").fetchall()
+    n = 0
+    for wh, item, cid, gap, cost in rows:
+        if gap > 1e-6:
+            _new_lot(conn, cid, item, wh, gap, None, cost, None, ("opening_balance", None))
+            n += 1
+    return n
 
 
 def lots_of(movement_lots) -> list:

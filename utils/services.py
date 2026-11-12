@@ -59,7 +59,7 @@ def add_client(name, cuisine, user, opening_cash=0.0, opening_bank=0.0):
 EDITABLE = {
     "clients": (["name", "cuisine"], "client", "clients"),
     "suppliers": (["name", "phone", "opening_balance"], "supplier", "purchases"),
-    "items": (["name", "unit", "min_qty", "track_expiry", "shelf_life_days"], "item", "purchases"),
+    "items": (["name", "barcode", "unit", "min_qty", "track_expiry"], "item", "purchases"),
     "dishes": (["name", "category", "price"], "dish", "production"),
     "expenses": (["exp_date", "amount", "note"], "expense", "expenses"),
 }
@@ -77,6 +77,10 @@ def apply_edits(table, original: pd.DataFrame, edited: pd.DataFrame, user, clien
                 rid = int(row["id"])
                 o = orig.loc[rid]
                 diff = {k: _clean(row[k]) for k in cols if _clean(row[k]) != _clean(o[k])}
+                if "barcode" in diff:
+                    diff["barcode"] = (str(diff["barcode"]).strip() or None) if diff["barcode"] is not None else None
+                    if diff["barcode"] and not re.fullmatch(r"[0-9A-Za-z\-_.]{1,64}", diff["barcode"]):
+                        raise ValueError(f"باركود غير صالح «{diff['barcode']}».")
                 if not diff:
                     continue
                 if table != "clients" and client_id is not None:
@@ -97,7 +101,7 @@ def apply_edits(table, original: pd.DataFrame, edited: pd.DataFrame, user, clien
                 log(c, user, "update", entity, rid, details, None, client_id)
                 changed += 1
     except sqlite3.IntegrityError:
-        raise ValueError("لا يمكن الحفظ: الاسم مكرر أو قيمة غير صالحة.")
+        raise ValueError("لا يمكن الحفظ: الاسم أو الباركود مكرر، أو قيمة غير صالحة.")
     return changed
 
 
@@ -114,18 +118,23 @@ def add_supplier(cid, name, phone, opening, user):
 
 
 @guard("purchases")
-def add_item(cid, name, unit, min_qty, user, is_semi=0, purchase_unit=None, factor=1.0, track_expiry=False, shelf_life_days=None):
+def add_item(cid, name, unit, min_qty, user, is_semi=0, purchase_unit=None, factor=1.0, track_expiry=False, shelf_life_days=None,
+             barcode=None):
     """unit = وحدة الاستهلاك (الأساسية). purchase_unit + factor: 1 purchase_unit = factor × unit."""
     if not name.strip() or not unit.strip():
         raise ValueError("اسم الصنف ووحدته مطلوبان.")
+    barcode = (barcode or "").strip() or None
+    if barcode and not re.fullmatch(r"[0-9A-Za-z\-_.]{1,64}", barcode):
+        raise ValueError("باركود غير صالح (أرقام وحروف لاتينية و- _ . فقط).")
     try:
         with tx() as c:
-            iid = c.execute("INSERT INTO items(client_id,name,unit,is_semi,min_qty,track_expiry,shelf_life_days,created_by) VALUES(?,?,?,?,?,?,?,?)",
-                            (cid, name.strip(), unit.strip(), is_semi, min_qty, 1 if track_expiry else 0, shelf_life_days, user)).lastrowid
+            iid = c.execute("INSERT INTO items(client_id,name,unit,is_semi,min_qty,track_expiry,shelf_life_days,barcode,created_by) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)", (cid, name.strip(), unit.strip(), is_semi, min_qty, 1 if track_expiry else 0,
+                                                          shelf_life_days, barcode, user)).lastrowid
             _add_purchase_unit(c, iid, unit.strip(), purchase_unit, factor)
             log(c, user, "create", "item", iid, name.strip(), None, cid)
     except sqlite3.IntegrityError:
-        raise ValueError("هذا الصنف موجود بالفعل.")
+        raise ValueError("هذا الصنف أو الباركود موجود بالفعل.")
     return iid
 
 

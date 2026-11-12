@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # رقم إصدار البنية لضمان التوافق مع app.py
 def schema_version() -> int:
-    return 3
+    return 5
 
 # جداول تُضاف لها أعمدة التدقيق
 AUDITED_TABLES = [
@@ -371,6 +371,7 @@ MANAGED_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_moves ON stock_movements(client_id, item_id, move_date);
 CREATE INDEX IF NOT EXISTS idx_moves_ref ON stock_movements(move_type, ref_id);
 CREATE INDEX IF NOT EXISTS idx_lots_item_wh ON stock_lots(item_id, warehouse_id);
+CREATE INDEX IF NOT EXISTS idx_lots_expiry ON stock_lots(client_id, expiry_date);
 CREATE INDEX IF NOT EXISTS idx_purchase_returns_client ON purchase_returns(client_id, return_date);
 CREATE INDEX IF NOT EXISTS idx_purchase_returns_invoice ON purchase_returns(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_return_lines_ret ON purchase_return_lines(return_id);
@@ -391,7 +392,8 @@ EXTRA_COLUMNS = {
     "users": [("all_modules", "INTEGER DEFAULT 1"), ("all_clients", "INTEGER DEFAULT 1"),
               ("must_change_password", "INTEGER DEFAULT 0"), ("password_changed_at", "TEXT"),
               ("last_login_at", "TEXT"), ("job_role", "TEXT")],
-    "items": [("track_expiry", "INTEGER DEFAULT 0"), ("shelf_life_days", "INTEGER DEFAULT 0")],
+    "items": [("track_expiry", "INTEGER DEFAULT 0"), ("shelf_life_days", "INTEGER DEFAULT 0"), ("barcode", "TEXT")],
+    "dishes": [("barcode", "TEXT")],
     # ملاحظة: ADD COLUMN يقبل REFERENCES (القيمة الافتراضية NULL)، فتحصل القواعد الجديدة على المفتاح الأجنبي.
     "purchase_invoices": [("subtotal", "REAL"), ("vat_rate", "REAL"), ("vat_amount", "REAL"),
                           ("wht_rate", "REAL"), ("wht_amount", "REAL"), ("image_path", "TEXT"),
@@ -587,7 +589,30 @@ def migrate(conn: sqlite3.Connection) -> None:
         pass
     ensure_defaults(conn)
     conn.commit()
+    for t in ("items", "dishes"):                             # الباركود فريد لكل مطعم (الفارغ مسموح بلا حدود)
+        try:
+            conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{t}_barcode ON {t}(client_id, barcode) "
+                         "WHERE barcode IS NOT NULL AND barcode <> ''")
+        except sqlite3.IntegrityError:
+            log.exception("باركود مكرر في %s؛ لم يُنشأ الفهرس الفريد", t)
+    conn.commit()
+    _ensure_lots(conn)
     _ensure_doc_numbers(conn)
+
+
+def _ensure_lots(conn) -> None:
+    """كل المخزون بالدفعات: الأرصدة القديمة خارج الدفعات تتحول إلى دفعات افتتاحية بلا تاريخ صلاحية (مرة واحدة)."""
+    from utils import inventory
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        n = inventory.backfill_lots(conn)
+        conn.commit()
+        if n:
+            log.info("أُنشئت %s دفعة افتتاحية للأرصدة خارج الدفعات", n)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        log.exception("تعذّر تحويل الأرصدة القديمة إلى دفعات")
 
 
 def _ensure_doc_numbers(conn) -> None:

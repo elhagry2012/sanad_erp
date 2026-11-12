@@ -8,3 +8,6 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+
+# ملفات تطبيق الويب (PWA) المولّدة تلقائيًا عند التشغيل
+static/sanad-pwa/

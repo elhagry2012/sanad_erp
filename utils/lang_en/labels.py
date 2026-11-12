@@ -1,0 +1,32 @@
+"""القاموس 5: عناوين أعمدة التقارير، أنواع الحركات، فئات هندسة القائمة، الوحدات والأدوار."""
+EN = {
+    " (إشعار دائن)": " (credit note)", " (بعد خصم ضريبة الخصم ": " (net of WHT ", "أدخله": "Entered by", "إجمالي المبيعات (حسب الكاشير)": "Gross sales (per POS)",
+    "استرداد نقدي/بنكي من المورد": "Cash/bank refund from supplier", "استيراد رصيد افتتاحي": "Opening balance import", "الإجمالي النقدي": "Total cash & bank",
+    "الاستيراد الجماعي للبيانات": "Bulk Data Import", "الطبيعة": "Behavior", "الفاتورة": "Invoice", "المبيعات الخاضعة بعد استبعاد الضريبة": "Taxable sales excluding VAT",
+    "المصروفات التشغيلية": "Operating expenses", "بدون (آجل / لم يُسدَّد الآن)": "None (on account / unpaid)", "بنك / فيزا": "Bank / card", "بيع": "Sale",
+    "تاريخ الاستلام": "Received date", "تحويل خزينة/بنك": "Cash/bank transfer", "تحويل صادر": "Transfer out", "تحويل وارد": "Transfer in", "تسوية جرد": "Stock adjustment",
+    "تعديل فاتورة شراء": "Purchase invoice amendment", "تقارير: إدارية وتحليلية": "Reports: management & analytics", "تقارير: ضريبية وإقفال": "Reports: tax & close",
+    "تقارير: مالية": "Reports: financial", "تقارير: مخزون وصلاحية وركود": "Reports: inventory, expiry & slow-moving", "تكلفة الوحدة (متوسط مرجح)": "Unit cost (WAC)",
+    "جرد وتسوية": "Stock count & adjustment", "دخول إنتاج": "Production receipt", "دفعة": "Payment", "دفعة ": "Payment ", "دفعة عند استلام الفاتورة": "Payment on invoice receipt",
+    "راكد": "Slow-moving", "راكد جدًا (90 يومًا فأكثر)": "Very slow (90+ days)", "ربحية وشعبية ضعيفتان: أعد تصميمه أو فكّر في حذفه.": "Low profitability and popularity: redesign or consider removing it.",
+    "ربحية وشعبية عاليتان: حافظ على الجودة وضعه في موضع بارز بالقائمة.": "High profitability and popularity: maintain quality and feature it prominently on the menu.",
+    "رقم التشغيلة": "Batch no.", "شراء": "Purchase receipt", "صافي ضريبة القيمة المضافة المستحقة (+) / القابلة للترحيل (-)": "Net VAT payable (+) / carried forward (−)",
+    "صرف للإنتاج": "Issue to production", "ضريبة الخصم تحت حساب الدفعات المقدمة المحتجزة (بعد المرتجعات)": "Withholding tax withheld (net of returns)",
+    "ضريبة القيمة المضافة على المبيعات (": "Output VAT on sales (", "ضريبة المشتريات القابلة للخصم (بعد المرتجعات)": "Recoverable input VAT (net of returns)", "عكس مستند": "Document reversal",
+    "قيمة الهدر والتالف": "Wastage & spoilage value", "ما يعادل بوحدة الشراء": "Equivalent in purchase UoM", "مبيعات": "Sales", "مدير عام (غير Admin)": "General Manager (non-admin)",
+    "مرتجع ": "Return ", "مرتجع مشتريات - ": "Purchase return - ", "مركز التقارير (الدخول للصفحة)": "Reports Center (page access)",
+    "مشتريات الفترة قبل الضريبة (بعد المرتجعات)": "Purchases for the period excl. tax (net of returns)", "ميت (180 يومًا فأكثر)": "Dead stock (180+ days)",
+    "هامش جيد لكن مبيعاته قليلة: حسّن مكانه بالقائمة وروّج له أو أعد تسميته.": "Good margin but low sales: reposition it on the menu, promote it or rename it.",
+    "هدر": "Wastage", "وجبة: ": "Dish: ", "يُباع كثيرًا بهامش ضعيف: ارفع سعره قليلًا أو خفّض تكلفته (الكمية/المورد).": "Sells well at a weak margin: raise the price slightly or reduce cost (portion/supplier).",
+    "⭐ نجم (Star)": "⭐ Star", "🐎 حصان العمل (Plowhorse)": "🐎 Plowhorse", "🐕 خاسر (Dog)": "🐕 Dog", "🔴 منتهي الصلاحية": "🔴 Expired", "🟢 جيد": "🟢 Healthy",
+    "🧩 لغز (Puzzle)": "🧩 Puzzle",
+    # فئات النظام الثابتة (قيود الخزينة اليدوية) وبنود المصروفات الافتراضية
+    "إيداع من المالك / الشركاء": "Owner / partner capital injection", "تحصيل": "Collection", "إيراد آخر": "Other income",
+    "تسوية رصيد": "Balance adjustment", "سحب مالك / شركاء": "Owner / partner drawings", "نثريات": "Petty expenses",
+    "سلفة موظف": "Employee advance", "رسوم بنكية": "Bank charges", "إيجار": "Rent", "مرتبات": "Payroll",
+    "كهرباء ومرافق": "Utilities", "تسويق": "Marketing", "صيانة": "Maintenance", "العربية": "العربية (Arabic)",
+    "fixed": "Fixed", "variable": "Variable",
+    # أنواع الحركات وعناوين متكررة في التقارير
+    "رصيد افتتاحي ": "Opening balance ", "مرتجع مشتريات ": "Purchase return ", "تعديل": "Edit", "اعتماد ": "Approve ",
+    "الإقفال": "Close", "مقفل": "Closed", "الوجبة ": "Dish ", "قيمة المخزون ": "Inventory value ", "الضريبة ": "Tax ",
+}

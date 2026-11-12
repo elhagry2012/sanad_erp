@@ -81,17 +81,16 @@ def render():
             st.caption("الأدوار: كاشير (مبيعات فقط)، مدير مطعم (التشغيل + تقارير المخزون والإدارة)، مدير مالي (الخزينة والمصروفات + التقارير المالية والضريبية)، مدير عام غير Admin (كل الوحدات عدا الاستيراد).")
             st.markdown("**الوحدات المسموحة**")
             all_m = st.checkbox("كل الوحدات (عرض وتعديل)", value=bool(row["all_modules"]), key=f"allm_{target}")
-            grid = pd.DataFrame([{"الوحدة": name, "key": k,
+            grid = pd.DataFrame([{"وحدة النظام": name, "key": k,
                                   "عرض": acc["all_modules"] or acc["modules"].get(k, (False, False))[0],
                                   "تعديل": acc["all_modules"] or acc["modules"].get(k, (False, False))[1]}
-                                 for k, name in security.MODULES.items() if k not in security.SENSITIVE_MODULES])
-            ed = st.data_editor(grid, hide_index=True, use_container_width=True, disabled=all_m or ["الوحدة", "key"],
+                                 for k, name in security.MODULES.items() if k not in security.ADMIN_ONLY_MODULES])
+            ed = st.data_editor(grid, hide_index=True, use_container_width=True, disabled=all_m or ["وحدة النظام", "key"],
                                 column_config={"key": None, "عرض": st.column_config.CheckboxColumn(),
                                                "تعديل": st.column_config.CheckboxColumn()}, key=f"permgrid_{target}")
             st.caption("«تعديل» يتضمن «عرض». وحدة بدون عرض لا تظهر للمستخدم أصلًا، وتُرفض عملياتها في الخدمات أيضًا.")
-            imp_now = acc["explicit"].get("import", (False, False))[1]
-            imp_on = st.checkbox("السماح بوحدة «الاستيراد الجماعي للبيانات» (حساسة: لا تشملها «كل الوحدات»، تُمنح بالاسم فقط)",
-                                 value=imp_now, key=f"imp_{target}")
+            st.caption("🔒 «استيراد البيانات» و«النسخ الاحتياطي وتنزيل قاعدة البيانات» أدوات إدارية للمدير العام وحده، "
+                       "ولا يمكن منحها لأي مستخدم آخر.")
             st.markdown("**المطاعم المسموحة**")
             all_c = st.checkbox("كل المطاعم", value=bool(row["all_clients"]), key=f"allc_{target}")
             names = list(clients["name"])
@@ -99,7 +98,6 @@ def render():
             chosen = st.multiselect("اختر المطاعم", names, default=default, disabled=all_c, key=f"cl_{target}")
             if st.button("حفظ الصلاحيات", type="primary"):
                 modules = {r["key"]: (bool(r["عرض"]) or bool(r["تعديل"]), bool(r["تعديل"])) for _, r in ed.iterrows()}
-                modules["import"] = (imp_on, imp_on)
                 ids = [int(clients.loc[clients["name"] == n, "id"].iloc[0]) for n in chosen]
                 if not all_c and not ids:
                     st.error("اختر مطعمًا واحدًا على الأقل، أو فعّل «كل المطاعم».")
@@ -161,9 +159,22 @@ def render():
     # ================= النسخ الاحتياطي =================
     with t5:
         st.write(f"تُحفظ نسخة تلقائية يوميًا داخل `{db.BACKUP_DIR}` (آخر {db.KEEP_BACKUPS} نسخة). صور الفواتير في `{db.IMAGES_DIR}` وتُنسخ منفصلة.")
-        if st.button("إنشاء نسخة احتياطية الآن"):
-            path = db.backup_db(force=True)
-            st.success(f"تم الحفظ: {path.name}")
-        if db.DB_PATH.exists():
-            st.download_button("تنزيل قاعدة البيانات الحالية", db.DB_PATH.read_bytes(), file_name="sanad.db",
-                               mime="application/octet-stream")
+        st.caption("🔒 للمدير العام فقط. كل نسخة وكل تنزيل يُسجَّل في سجل الأمان. ملف القاعدة يحتوي كل البيانات المالية "
+                   "وبيانات الدخول المشفّرة، فاحفظه في مكان آمن.")
+        b1, b2 = st.columns(2)
+        if b1.button("إنشاء نسخة احتياطية الآن", use_container_width=True):
+            try:
+                path = security.backup_now(me)
+                st.success(f"تم الحفظ: {path.name}")
+            except security.PermissionDenied as e:
+                st.error(str(e))
+        if b2.button("تجهيز نسخة من قاعدة البيانات للتنزيل", use_container_width=True):
+            try:
+                st.session_state["_db_snapshot"] = security.backup_snapshot(me)
+            except security.PermissionDenied as e:
+                st.error(str(e))
+        snap = st.session_state.get("_db_snapshot")
+        if snap:
+            data, name = snap
+            st.download_button(f"⬇️ تنزيل {name}", data, file_name=name, mime="application/octet-stream", type="primary",
+                               on_click=security.log_backup_download, args=(me, name), use_container_width=True)

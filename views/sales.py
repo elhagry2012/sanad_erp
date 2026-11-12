@@ -41,16 +41,39 @@ def render():
         day = st.date_input("تاريخ المبيعات", date.today(), key="sale_day")
         channel, detail, pay, bank_amt = _options("man")
         grid = dishes[["id", "name", "price"]].rename(columns={"name": "الوجبة", "price": "السعر"}).copy()
-        grid["الكمية المباعة"] = 0.0
-        ed = st.data_editor(grid, hide_index=True, use_container_width=True, key="sales_grid",
-                            disabled=["id", "الوجبة", "السعر"], column_config={"id": None})
+        mobile = theme.is_mobile()
+        if st.session_state.get("sale_done"):
+            st.success(st.session_state.pop("sale_done"))
+        if mobile:
+            # الجوال/اللوحي: بطاقة لكل وجبة بزر + / − كبير بدل جدول التحرير (أسهل باللمس)، مع بحث سريع
+            q = st.text_input("🔎 بحث عن وجبة", key="sale_q", placeholder="اكتب جزءًا من اسم الوجبة")
+            shown = grid[grid["الوجبة"].str.contains(q.strip(), case=False, regex=False)] if q.strip() else grid
+            for i in range(0, len(shown), 2):
+                for col, (_, d) in zip(st.columns(2), shown.iloc[i:i + 2].iterrows()):
+                    with col.container(border=True):
+                        st.number_input(f"{d['الوجبة']} — {d['السعر']:,.2f}", min_value=0, step=1, key=f"sale_m_{int(d['id'])}")
+            grid["الكمية المباعة"] = [float(st.session_state.get(f"sale_m_{int(i)}", 0) or 0) for i in grid["id"]]
+            ed = grid
+            picked = ed[ed["الكمية المباعة"] > 0]
+            if not picked.empty:
+                st.caption("في هذا الإدخال: " + "، ".join(f"{r['الوجبة']} × {r['الكمية المباعة']:g}" for _, r in picked.iterrows()))
+        else:
+            grid["الكمية المباعة"] = 0.0
+            ed = st.data_editor(grid, hide_index=True, use_container_width=True, key="sales_grid",
+                                disabled=["id", "الوجبة", "السعر"], column_config={"id": None})
         total = float((ed["السعر"] * ed["الكمية المباعة"]).sum())
         st.metric("إجمالي هذا الإدخال", f"{total:,.2f}")
-        if st.button("تسجيل المبيعات وخصم المخزن", type="primary"):
+        if st.button("تسجيل المبيعات وخصم المخزن", type="primary", use_container_width=mobile):
             rows = [(day, int(r["id"]), r["الكمية المباعة"]) for _, r in ed.iterrows() if r["الكمية المباعة"] > 0]
             try:
                 n, rev = services.record_sales(cid, rows, user, pay, bank_amt, channel, detail)
-                st.success(f"تم تسجيل {n} سطر بإيراد {rev:,.2f} وخصم المكونات من مخزن التشغيل.")
+                msg = f"تم تسجيل {n} سطر بإيراد {rev:,.2f} وخصم المكونات من مخزن التشغيل."
+                if mobile:                                     # تصفير الكميات حتى لا يُسجَّل نفس الإدخال مرتين بلمسة ثانية
+                    for k in [k for k in st.session_state if str(k).startswith("sale_m_")]:
+                        st.session_state.pop(k)
+                    st.session_state["sale_done"] = msg
+                    st.rerun()
+                st.success(msg)
             except ValueError as e:
                 st.error(str(e))
 

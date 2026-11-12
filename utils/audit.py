@@ -6,7 +6,7 @@ ENTITY_AR = {
     "supplier_payment": "دفعة مورد", "recipe": "وصفة", "dish": "وجبة",
     "production_batch": "تشغيلة إنتاج", "sale": "مبيعات كاشير", "waste": "هالك",
     "expense": "مصروف", "expense_category": "بند مصروف", "stocktake": "جرد",
-    "client": "عميل", "treasury": "حركة خزينة", "warehouse": "مخزن", "import": "استيراد جماعي", "edit_request": "طلب تعديل", "purchase_return": "مرتجع مشتريات", "purchase_adjustment": "تعديل مباشر لفاتورة شراء", "period": "إقفال فترة", "settings": "إعدادات", "export": "تصدير بيانات", "transfer": "إذن تحويل", "permission": "صلاحيات", "user": "مستخدم", "session": "جلسة دخول",
+    "client": "عميل", "treasury": "حركة خزينة", "warehouse": "مخزن", "import": "استيراد جماعي", "edit_request": "طلب تعديل", "purchase_return": "مرتجع مشتريات", "purchase_adjustment": "تعديل مباشر لفاتورة شراء", "period": "إقفال فترة", "settings": "إعدادات", "export": "تصدير بيانات", "transfer": "إذن تحويل", "permission": "صلاحيات", "user": "مستخدم", "session": "جلسة دخول", "backup": "نسخة احتياطية",
 }
 ACTION_AR = {
     "create": "إضافة", "update": "تعديل", "delete": "حذف",

@@ -86,61 +86,60 @@ def client_name() -> str:
 def login_screen() -> None:
     clients = query("SELECT id, name FROM clients ORDER BY name")
     options = [NO_CLIENT_LABEL] + list(clients["name"])
-    _, mid, _ = st.columns([1, 1.2, 1])
-    with mid:
-        st.image(str(theme.LOGO), use_container_width=True)
-        st.markdown("<h3 style='text-align:center'>تسجيل الدخول</h3>", unsafe_allow_html=True)
-        if st.session_state.get("session_msg"):
-            st.warning(st.session_state.pop("session_msg"))
-        with st.form("login"):
-            pick = st.selectbox("المطعم", options)
-            user = st.text_input("اسم المستخدم", autocomplete="username")
-            pw = st.text_input("كلمة المرور", type="password", autocomplete="current-password")
-            if st.form_submit_button("دخول", use_container_width=True):
-                uname = (user or "").strip().lower()
-                is_admin_name = uname == security.ADMIN_USERNAME
-                if pick == NO_CLIENT_LABEL and not is_admin_name:
-                    st.error("اختر المطعم الذي ستعمل عليه.")
+    theme.login_css()
+    theme.header_controls()
+    theme.login_head()
+    if st.session_state.get("session_msg"):
+        st.warning(st.session_state.pop("session_msg"))
+    with st.form("login"):
+        pick = st.selectbox("المطعم", options)
+        user = st.text_input("اسم المستخدم", autocomplete="username")
+        pw = st.text_input("كلمة المرور", type="password", autocomplete="current-password")
+        if st.form_submit_button("دخول", use_container_width=True):
+            uname = (user or "").strip().lower()
+            is_admin_name = uname == security.ADMIN_USERNAME
+            if pick == NO_CLIENT_LABEL and not is_admin_name:
+                st.error("اختر المطعم الذي ستعمل عليه.")
+            else:
+                info, msg = security.authenticate(user, pw)
+                if not info:
+                    st.error(msg)
+                elif pick != NO_CLIENT_LABEL and not security.client_allowed(
+                        info["username"], int(clients.loc[clients["name"] == pick, "id"].iloc[0])):
+                    security.log_event(info["username"], "access_denied", "permission", f"محاولة دخول مطعم غير مصرح: {pick}")
+                    st.error("ليس لديك صلاحية على هذا المطعم.")
                 else:
-                    info, msg = security.authenticate(user, pw)
-                    if not info:
-                        st.error(msg)
-                    elif pick != NO_CLIENT_LABEL and not security.client_allowed(
-                            info["username"], int(clients.loc[clients["name"] == pick, "id"].iloc[0])):
-                        security.log_event(info["username"], "access_denied", "permission", f"محاولة دخول مطعم غير مصرح: {pick}")
-                        st.error("ليس لديك صلاحية على هذا المطعم.")
-                    else:
-                        st.session_state["sess_token"] = security.create_session(info["id"])
-                        st.session_state["user"] = info
-                        st.session_state["_login_client"] = ALL_LABEL if pick == NO_CLIENT_LABEL else pick
-                        st.rerun()
-        if clients.empty:
-            st.caption("لا توجد مطاعم مسجلة بعد. المدير العام يستطيع الدخول وإضافة أول مطعم.")
+                    st.session_state["sess_token"] = security.create_session(info["id"])
+                    st.session_state["user"] = info
+                    st.session_state["_login_client"] = ALL_LABEL if pick == NO_CLIENT_LABEL else pick
+                    st.rerun()
+    if clients.empty:
+        st.caption("لا توجد مطاعم مسجلة بعد. المدير العام يستطيع الدخول وإضافة أول مطعم.")
 
 
 def forced_password_change() -> None:
     """يظهر بدل التطبيق كله حتى يغيّر المستخدم كلمة المرور (مؤقتة، أو ضعيفة، أو أول دخول)."""
-    _, mid, _ = st.columns([1, 1.4, 1])
-    with mid:
-        st.image(str(theme.LOGO), use_container_width=True)
-        st.markdown("### يجب تغيير كلمة المرور قبل المتابعة")
-        st.caption("كلمة المرور الحالية مؤقتة أو لا تحقق سياسة الأمان: 10 أحرف على الأقل، حروف وأرقام، وغير متوقعة.")
-        with st.form("force_pw"):
-            old = st.text_input("كلمة المرور الحالية", type="password")
-            new = st.text_input("كلمة المرور الجديدة", type="password")
-            new2 = st.text_input("تأكيد كلمة المرور الجديدة", type="password")
-            if st.form_submit_button("تغيير ومتابعة", use_container_width=True):
-                if new != new2:
-                    st.error("كلمتا المرور غير متطابقتين.")
-                else:
-                    try:
-                        security.change_own_password(username(), old, new, keep_token=current_token())
-                        st.session_state["user"]["must_change"] = False
-                        st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
-        if st.button("تسجيل الخروج"):
-            logout()
+    theme.login_css()
+    theme.header_controls()
+    theme.login_head()
+    st.markdown("#### يجب تغيير كلمة المرور قبل المتابعة")
+    st.caption("كلمة المرور الحالية مؤقتة أو لا تحقق سياسة الأمان: 10 أحرف على الأقل، حروف وأرقام، وغير متوقعة.")
+    with st.form("force_pw"):
+        old = st.text_input("كلمة المرور الحالية", type="password")
+        new = st.text_input("كلمة المرور الجديدة", type="password")
+        new2 = st.text_input("تأكيد كلمة المرور الجديدة", type="password")
+        if st.form_submit_button("تغيير ومتابعة", use_container_width=True):
+            if new != new2:
+                st.error("كلمتا المرور غير متطابقتين.")
+            else:
+                try:
+                    security.change_own_password(username(), old, new, keep_token=current_token())
+                    st.session_state["user"]["must_change"] = False
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+    if st.button("تسجيل الخروج"):
+        logout()
 
 
 def logout() -> None:

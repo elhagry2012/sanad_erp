@@ -407,6 +407,134 @@ def lots_df(cid, warehouse_id=None) -> pd.DataFrame:
     return df
 
 
+def _policy(cid) -> str:
+    df = query("SELECT value FROM client_settings WHERE client_id=? AND key='issue_policy'", (cid,))
+    v = df["value"].iloc[0] if not df.empty else "fefo"
+    return v if v in ("fefo", "fifo") else "fefo"
+
+
+def _status(days):
+    if days is None or pd.isna(days):
+        return "⚪ بدون تاريخ صلاحية"
+    days = int(days)
+    return ("🔴 منتهي الصلاحية" if days < 0 else "🟠 خلال أسبوع" if days <= 7 else "🟡 خلال أسبوعين" if days <= 14
+            else "🟢 خلال شهر" if days <= 30 else "✅ صالح")
+
+
+def _ordered_lots(cid, warehouse_id=None, item_id=None) -> pd.DataFrame:
+    """كل الدفعات ذات الرصيد بترتيب الصرف الفعلي لكل (صنف، مخزن) حسب سياسة المطعم."""
+    sql = """SELECT l.id, l.item_id, l.warehouse_id, i.name AS item, i.unit, w.name AS warehouse, l.qty_remaining AS qty,
+             l.expiry_date, l.received_date, l.unit_cost FROM stock_lots l JOIN items i ON i.id=l.item_id
+             JOIN warehouses w ON w.id=l.warehouse_id WHERE l.client_id=? AND l.qty_remaining>0.000000001"""
+    params = [cid]
+    if warehouse_id:
+        sql += " AND l.warehouse_id=?"; params.append(int(warehouse_id))
+    if item_id:
+        sql += " AND l.item_id=?"; params.append(int(item_id))
+    df = query(sql, tuple(params))
+    if df.empty:
+        return df
+    df["_noexp"] = df["expiry_date"].isna()
+    df["_exp"] = df["expiry_date"].fillna("9999-12-31")
+    df["_rcv"] = df["received_date"].fillna("")
+    keys = ["item", "warehouse"] + (["_noexp", "_exp", "_rcv", "id"] if _policy(cid) == "fefo" else ["_rcv", "id"])
+    df = df.sort_values(keys).reset_index(drop=True)
+    df["issue_rank"] = df.groupby(["item_id", "warehouse_id"]).cumcount() + 1
+    today = date.today()
+    df["days_left"] = df["expiry_date"].map(lambda d: (date.fromisoformat(d) - today).days if isinstance(d, str) else None)
+    return df.drop(columns=["_noexp", "_exp", "_rcv"])
+
+
+def expiry_breakdown(cid, warehouse_id=None, item_id=None) -> pd.DataFrame:
+    """الرصيد المتبقي لكل صنف موزعًا على تواريخ الصلاحية (لكل مخزن)، بترتيب الصرف، مع مطابقة مجموع الدفعات برصيد المخزن."""
+    lots = _ordered_lots(cid, warehouse_id, item_id)
+    out = pd.DataFrame()
+    if not lots.empty:
+        lots["exp_key"] = lots["expiry_date"].fillna("")
+        lots["value"] = lots["qty"] * lots["unit_cost"]
+        g = lots.groupby(["item_id", "warehouse_id", "item", "unit", "warehouse", "exp_key"], sort=False).agg(
+            qty=("qty", "sum"), value=("value", "sum"), lots=("id", "count"), first_rank=("issue_rank", "min"),
+            received=("received_date", "min"), days_left=("days_left", "first")).reset_index()
+        g["order"] = g.groupby(["item_id", "warehouse_id"])["first_rank"].rank(method="dense").astype(int)
+        tot = g.groupby(["item_id", "warehouse_id"])["qty"].transform("sum")
+        g["share"] = (g["qty"] / tot * 100).round(1)
+        out = g
+    # مطابقة: رصيد المخزن مقابل مجموع الدفعات (يجب أن يتطابقا؛ الفرق يظهر صراحة إن وُجد)
+    sql = """SELECT s.item_id, s.warehouse_id, i.name AS item, i.unit, w.name AS warehouse, s.qty,
+             COALESCE((SELECT SUM(l.qty_remaining) FROM stock_lots l WHERE l.item_id=s.item_id AND l.warehouse_id=s.warehouse_id
+                       AND l.qty_remaining>0),0) AS lots_qty
+             FROM warehouse_stock s JOIN items i ON i.id=s.item_id JOIN warehouses w ON w.id=s.warehouse_id WHERE w.client_id=?"""
+    params = [cid]
+    if warehouse_id:
+        sql += " AND s.warehouse_id=?"; params.append(int(warehouse_id))
+    if item_id:
+        sql += " AND s.item_id=?"; params.append(int(item_id))
+    rec = query(sql, tuple(params))
+    rec = rec[(rec["qty"] - rec["lots_qty"]).abs() > 1e-6]
+    if not rec.empty:
+        extra = pd.DataFrame({"item_id": rec["item_id"], "warehouse_id": rec["warehouse_id"], "item": rec["item"], "unit": rec["unit"],
+                              "warehouse": rec["warehouse"], "exp_key": "غير مطابق", "qty": rec["qty"] - rec["lots_qty"], "value": 0.0,
+                              "lots": 0, "order": 999, "share": None, "received": None, "days_left": None})
+        out = pd.concat([out, extra], ignore_index=True)
+    if out.empty:
+        return out
+    out["status"] = [("⚠️ رصيد بلا دفعة (سالب/غير مطابق)" if k == "غير مطابق" else _status(d)) for k, d in zip(out["exp_key"], out["days_left"])]
+    out = out.sort_values(["item", "warehouse", "order"])
+    return pd.DataFrame({
+        "الصنف": out["item"], "المخزن": out["warehouse"], "تاريخ الصلاحية": out["exp_key"].replace("", "بدون تاريخ"),
+        "الحالة": out["status"], "الأيام المتبقية": out["days_left"], "الكمية المتبقية": out["qty"].round(6), "الوحدة": out["unit"],
+        "% من رصيد الصنف": out["share"], "القيمة": out["value"].round(2), "عدد الدفعات": out["lots"],
+        "ترتيب الصرف": out["order"].where(out["order"] < 999), "أول استلام": out["received"]}).reset_index(drop=True)
+
+
+def consumption_rates(cid, lookback=30) -> dict:
+    """متوسط الاستهلاك اليومي لكل (صنف، مخزن) خلال آخر lookback يوم: البيع + الصرف للإنتاج + التحويل الصادر (بدون الهدر)."""
+    since = str(date.today() - timedelta(days=lookback))
+    df = query("""SELECT m.item_id, m.warehouse_id, -SUM(m.qty) AS out_qty FROM stock_movements m
+                  LEFT JOIN transfer_vouchers v ON m.move_type='transfer_out' AND v.id=m.ref_id
+                  LEFT JOIN production_batches b ON m.move_type='production_out' AND b.id=m.ref_id
+                  WHERE m.client_id=? AND m.move_date>=? AND m.move_type IN ('sale','production_out','transfer_out')
+                  AND COALESCE(v.is_voided,0)=0 AND COALESCE(b.is_voided,0)=0
+                  GROUP BY m.item_id, m.warehouse_id""", (cid, since))
+    return {(int(r["item_id"]), int(r["warehouse_id"])): max(float(r["out_qty"] or 0), 0.0) / lookback for _, r in df.iterrows()}
+
+
+def expiry_risk(cid, lookback=30, warehouse_id=None) -> pd.DataFrame:
+    """تنبؤ بالتالف: يمشي على الدفعات بترتيب الصرف الفعلي ويستهلكها بمعدل الاستهلاك اليومي، فيحسب لكل دفعة ذات تاريخ
+    كم سيُستهلك قبل انتهائها وكم سيبقى «معرّضًا للتلف». الدفعة التي تنتهي وفيها باقٍ تُترك (لا تُستهلك) وينتقل الاستهلاك لما بعدها."""
+    lots = _ordered_lots(cid, warehouse_id)
+    if lots.empty:
+        return pd.DataFrame()
+    rates = consumption_rates(cid, lookback)
+    today = date.today()
+    rows = []
+    for (iid, wid), grp in lots.groupby(["item_id", "warehouse_id"], sort=False):
+        rate = rates.get((int(iid), int(wid)), 0.0)
+        t = 0.0                                                # اليوم الذي يبدأ فيه استهلاك الدفعة الحالية
+        for _, l in grp.iterrows():
+            q, d = float(l["qty"]), l["days_left"]
+            if d is None or pd.isna(d):
+                t += q / rate if rate > 0 else float("inf")
+                continue
+            d = float(d)
+            if d < 0 or rate <= 0 or t >= d:
+                used = 0.0
+            else:
+                used = min(q, rate * (d - t))
+            risk = q - used
+            finish = None
+            if rate > 0 and t != float("inf"):
+                if risk <= 1e-9:
+                    finish = today + timedelta(days=int(round(t + q / rate)))
+                t = t + used / rate if risk <= 1e-9 else max(t, d)
+            rows.append({"الحالة": _status(d), "الصنف": l["item"], "المخزن": l["warehouse"], "تاريخ الصلاحية": l["expiry_date"],
+                         "الأيام المتبقية": int(d), "ترتيب الصرف": int(l["issue_rank"]), "الرصيد": round(q, 6), "الوحدة": l["unit"],
+                         "الاستهلاك اليومي": round(rate, 3), "يُستهلك قبل الانتهاء": round(used, 3), "معرّض للتلف": round(risk, 3),
+                         "قيمة المعرّض للتلف": round(risk * float(l["unit_cost"] or 0), 2),
+                         "نفاد الدفعة المتوقع": str(finish) if finish else ("لا استهلاك مسجل" if rate <= 0 else "—")})
+    return pd.DataFrame(rows)
+
+
 # ================================================================= الأصناف الراكدة
 def dead_stock(cid, days=60) -> pd.DataFrame:
     """أصناف لها رصيد ولم تُستهلك (بيع/تصنيع/هدر) منذ `days` يومًا أو أكثر، مصنّفة حسب مدة الركود."""

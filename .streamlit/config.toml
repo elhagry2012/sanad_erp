@@ -10,6 +10,7 @@ headless = true
 enableXsrfProtection = true   # حماية CSRF لرفع الملفات
 enableCORS = true
 maxUploadSize = 10            # ميجابايت
+enableStaticServing = true    # يقدّم مجلد static/ عبر /app/static/ (ملفات تطبيق الويب PWA: الأيقونات والـ manifest)
 
 [browser]
 gatherUsageStats = false

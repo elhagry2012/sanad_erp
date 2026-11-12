@@ -162,6 +162,23 @@ def _lots(cid):
           "الدفعات وتواريخ الصلاحية", "lots_report", auth.client_name(), "rc_lots")
 
 
+def _expiry_breakdown(cid):
+    df = reports.expiry_breakdown(cid)
+    _show([Section("الرصيد المتبقي حسب تاريخ الصلاحية", df, {"الكمية المتبقية": FMT_QTY, "القيمة": FMT_MONEY}, ["القيمة"])],
+          "الرصيد المتبقي حسب تاريخ الصلاحية", "expiry_breakdown", auth.client_name(), "rc_exp_bd")
+
+
+def _expiry_risk(cid):
+    lb = st.slider("معدل الاستهلاك من آخر (يوم)", 7, 90, 30, key="rc_risk_lb")
+    df = reports.expiry_risk(cid, lb)
+    if df.empty:
+        st.success("لا توجد دفعات ذات تاريخ صلاحية.")
+        return
+    _show([Section("توقع استهلاك الدفعات قبل انتهاء الصلاحية", df,
+                   {"الرصيد": FMT_QTY, "معرّض للتلف": FMT_QTY, "قيمة المعرّض للتلف": FMT_MONEY}, ["قيمة المعرّض للتلف"])],
+          "توقع التالف قبل الاستهلاك", "expiry_risk", f"{auth.client_name()} — معدل آخر {lb} يومًا", "rc_exp_risk")
+
+
 def _dead(cid):
     days = st.slider("يُعدّ راكدًا إن لم يُستهلك منذ (يوم)", 30, 365, 60, step=10, key="dead_days")
     df = reports.dead_stock(cid, days)
@@ -259,6 +276,7 @@ REPORTS = {
                       ("المشتريات والمرتجعات", _purchases), ("المصروفات", _expenses), ("أرصدة الموردين", _supplier_balances)],
     "rep_tax": [("الملخص الضريبي للفترة", _tax), ("الإقفال الشهري والسنوي", _closing)],
     "rep_inventory": [("تقييم المخزون (كل المخازن)", _valuation), ("الأصناف التي قاربت صلاحيتها", _expiry), ("الدفعات وتواريخ الصلاحية", _lots),
+                      ("الرصيد المتبقي حسب تاريخ الصلاحية", _expiry_breakdown), ("توقع التالف قبل الاستهلاك", _expiry_risk),
                       ("الأصناف الراكدة (Dead Stock)", _dead), ("حد الطلب والتغطية", _reorder), ("حركة المخزن", _movements), ("سجل الجرد", _stocktakes)],
     "rep_management": [("هندسة القائمة", _menu), ("الهدر والتالف", _waste), ("تكلفة الوجبات", _dish_costs), ("انحراف أسعار الخامات", _price_var)],
 }

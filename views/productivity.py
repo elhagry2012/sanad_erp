@@ -52,7 +52,7 @@ def render():
     l.plotly_chart(theme.style_fig(fig), use_container_width=True)
     daily = work.assign(day=work["ts"].str[:10]).groupby(["day", "username"], as_index=False).size()
     r.plotly_chart(theme.style_fig(px.bar(daily, x="day", y="size", color="username", title="النشاط اليومي",
-                                          labels={"day": "اليوم", "size": "العمليات", "username": "المستخدم"})),
+                                          labels={"day": "التاريخ", "size": "العمليات", "username": "المستخدم"})),
                    use_container_width=True)
 
     st.subheader("نوع العمل لكل مستخدم")

@@ -20,10 +20,68 @@ def _wh_picker(cid, key, with_all=True, default_ops=False):
     return pick, wid
 
 
+def _lots_tab(cid):
+    """الرصيد المتبقي لكل تاريخ صلاحية + تنبيهات الصلاحية المبنية على ترتيب الصرف ومعدل الاستهلاك."""
+    pol = reports._policy(cid)
+    st.caption(f"كل كمية بالمخزن تتبع دفعة (سطر شراء، تشغيلة إنتاج، تحويل، تسوية جرد، أو رصيد افتتاحي). "
+               f"سياسة الصرف الحالية: **{inventory.ISSUE_POLICIES[pol]}** — «ترتيب الصرف» يوضح أي دفعة تُصرف أولًا.")
+    a, b = st.columns(2)
+    with a:
+        pick, wid = _wh_picker(cid, "lots_wh")
+    names = query("SELECT id, name FROM items WHERE client_id=? ORDER BY is_semi, name", (cid,))
+    iname = b.selectbox("الصنف", ["كل الأصناف"] + list(names["name"]), key="lots_item")
+    iid = None if iname == "كل الأصناف" else int(names.loc[names["name"] == iname, "id"].iloc[0])
+
+    st.subheader("⏳ تنبيهات الصلاحية (حسب ترتيب الصرف ومعدل الاستهلاك)")
+    lb = st.slider("معدل الاستهلاك محسوب من آخر (يوم)", 7, 90, 30, step=1, key="lots_lb")
+    risk = reports.expiry_risk(cid, lb, wid)
+    if not risk.empty and iid:
+        risk = risk[risk["الصنف"] == iname]
+    if risk.empty:
+        st.success("لا توجد دفعات ذات تاريخ صلاحية.")
+    else:
+        at = risk[risk["معرّض للتلف"] > 1e-9]
+        m = st.columns(4)
+        m[0].metric("🔴 دفعات منتهية بها رصيد", int((risk["الأيام المتبقية"] < 0).sum()))
+        m[1].metric("🟠 تنتهي خلال 7 أيام", int(((risk["الأيام المتبقية"] >= 0) & (risk["الأيام المتبقية"] <= 7)).sum()))
+        m[2].metric("دفعات لن تُستهلك بالكامل قبل انتهائها", len(at))
+        m[3].metric("قيمة المعرّض للتلف", f"{at['قيمة المعرّض للتلف'].sum():,.2f}")
+        if not at.empty:
+            st.warning("هذه الدفعات لن تُستهلك بالكامل قبل انتهاء صلاحيتها بمعدل الاستهلاك الحالي — "
+                       "استخدمها أولًا في الإنتاج/العروض، أو حوّلها لمخزن التشغيل، أو أرجعها للمورد:")
+            st.dataframe(at.round(3), use_container_width=True, hide_index=True)
+        with st.expander("كل الدفعات ذات تاريخ صلاحية مع توقع استهلاكها"):
+            st.dataframe(risk.round(3), use_container_width=True, hide_index=True)
+        export_buttons(risk, "توقع استهلاك الدفعات قبل انتهاء الصلاحية", "expiry_risk", subtitle=f"{auth.client_name()} — {pick}",
+                       formats={"الرصيد": FMT_QTY, "يُستهلك قبل الانتهاء": FMT_QTY, "معرّض للتلف": FMT_QTY, "قيمة المعرّض للتلف": FMT_MONEY},
+                       totals=["قيمة المعرّض للتلف"], key="lots_risk_exp")
+
+    st.subheader("📦 الرصيد المتبقي حسب تاريخ الصلاحية")
+    bd = reports.expiry_breakdown(cid, wid, iid)
+    if bd.empty:
+        st.info("لا يوجد رصيد.")
+        return
+    bad = bd[bd["تاريخ الصلاحية"] == "غير مطابق"]
+    if not bad.empty:
+        st.error("أرصدة لا تقابلها دفعات (عادة رصيد سالب بسبب صرف بدون رصيد مسجل): " + "، ".join(bad["الصنف"] + " / " + bad["المخزن"]) +
+                 ". تُسوّى بالجرد أو بتسجيل المشتريات الناقصة.")
+    if iid:
+        tot = bd[bd["تاريخ الصلاحية"] != "غير مطابق"]
+        cols = st.columns(min(len(tot), 6) or 1)
+        for col, (_, r) in zip(cols, tot.head(6).iterrows()):
+            col.metric(f"{r['تاريخ الصلاحية']} — {r['المخزن']}", f"{r['الكمية المتبقية']:,.3f} {r['الوحدة']}", r["الحالة"], delta_color="off")
+    st.dataframe(bd, use_container_width=True, hide_index=True)
+    export_buttons(bd, "الرصيد المتبقي حسب تاريخ الصلاحية", "expiry_breakdown", subtitle=f"{auth.client_name()} — {pick} — {iname}",
+                   formats={"الكمية المتبقية": FMT_QTY, "القيمة": FMT_MONEY}, totals=["القيمة"], key="lots_bd_exp")
+
+
 def render():
     cid, user = auth.require_client(), auth.username()
     theme.header("المخزن والأسعار والجرد", auth.client_name())
-    t1, t2, t3, t4, t5 = st.tabs(["أرصدة المخزون", "انحراف الأسعار", "كارت الصنف", "حركة المخزن", "جرد المخازن"])
+    t1, t6, t2, t3, t4, t5 = st.tabs(["أرصدة المخزون", "📅 الدفعات والصلاحية", "انحراف الأسعار", "كارت الصنف", "حركة المخزن", "جرد المخازن"])
+
+    with t6:
+        _lots_tab(cid)
 
     with t1:
         pick, wid = _wh_picker(cid, "bal_wh")
@@ -139,7 +197,7 @@ def render():
             with st.expander("📅 الدفعات وتواريخ الصلاحية في هذا المخزن (للمطابقة أثناء الجرد)"):
                 lt = reports.lots_df(cid, wid)
                 if lt.empty:
-                    st.caption("لا توجد دفعات ذات تاريخ صلاحية في هذا المخزن.")
+                    st.caption("لا توجد دفعات بها رصيد في هذا المخزن.")
                 else:
                     st.dataframe(lt.round(3), use_container_width=True, hide_index=True)
                     gone = lt[(lt["أيام للانتهاء"].notna()) & (lt["أيام للانتهاء"] < 0)]

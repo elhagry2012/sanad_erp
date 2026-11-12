@@ -2,9 +2,10 @@
 import streamlit as st
 
 from database.db import init_db, backup_db, schema_version
-from utils import theme, auth, security, config, controls
+from utils import theme, auth, security, config, controls, i18n
 
-st.set_page_config(page_title="سند للأعمال", page_icon=str(theme.LOGO), layout="wide")
+i18n.install()                                  # ترجمة الواجهة عند اختيار English (مرة لكل عملية خادم؛ لا أثر في العربية)
+st.set_page_config(page_title=i18n.t("سند للأعمال"), page_icon=str(theme.LOGO), layout="wide", initial_sidebar_state="auto")
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -17,11 +18,25 @@ def _bootstrap(_schema: int) -> bool:
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def _pwa_version() -> str:
+    """يولّد ملفات تطبيق الويب (الأيقونات والـ manifest) في مجلد static داخل المشروع فقط، مرة لكل تشغيل للخادم."""
+    try:
+        from tools import pwa_setup
+        return pwa_setup.build_app_static()
+    except Exception:                          # لا يمنع تشغيل النظام؛ فقط لن يظهر خيار التثبيت
+        return ""
+
+
 _bootstrap(schema_version())
 theme.inject_css()
+if _v := _pwa_version():
+    theme.pwa_head(_v)
 auth.refresh_session()
 
 user = auth.current_user()
+if user and not user.get("must_change"):
+    theme.header_controls()                     # الوضع الداكن/الفاتح والعربية/English: ثابتان أعلى كل صفحة
 if not user:
     auth.login_screen()
     st.stop()
@@ -46,6 +61,7 @@ with st.sidebar:
     st.markdown(f"**{user['full_name']}**")
     st.caption("المدير العام" if auth.is_admin() else "شريك / فريق العمل")
     auth.sidebar_client_picker()
+    theme.mode_picker()
     if st.button("تسجيل الخروج", use_container_width=True):
         auth.logout()
     def _badge():
@@ -61,37 +77,39 @@ with st.sidebar:
     if config.IS_PROD is False:
         st.caption("بيئة تطوير")
 
+# (القسم، المفتاح، الدالة، العنوان، الأيقونة، المسار) — الأقسام تسهّل التنقل في القائمة المنزلقة على الجوال
 CATALOG = [
-    ("dashboard", dashboard.render, "لوحة التحكم", "📊", "dashboard"),
-    ("purchases", purchases.render, "المشتريات والموردون", "🧾", "purchases"),
-    ("inventory", inventory.render, "المخزن والأسعار والجرد", "📦", "inventory"),
-    ("warehouses", warehouses.render, "المخازن وأذون التحويل", "🏬", "warehouses"),
-    ("treasury", treasury.render, "الخزينة والبنك", "💰", "treasury"),
-    ("production", production.render, "التصنيع والوصفات", "🍳", "production"),
-    ("sales", sales.render, "مبيعات الكاشير", "🛒", "sales"),
-    ("expenses", expenses.render, "المصروفات", "💸", "expenses"),
-    ("waste", waste.render, "الهدر والتالف", "🗑️", "waste"),
-    ("menu", menu_engineering.render, "هندسة القائمة", "🎯", "menu"),
-    ("clients", clients.render, "العملاء (المطاعم)", "🏪", "clients"),
-    ("import", data_import.render, "استيراد البيانات", "📥", "import"),
-    ("reports", reports_center.render, "مركز التقارير", "🗂️", "reports"),
+    ("العمليات اليومية", "dashboard", dashboard.render, "لوحة التحكم", "📊", "dashboard"),
+    ("العمليات اليومية", "sales", sales.render, "مبيعات الكاشير", "🛒", "sales"),
+    ("العمليات اليومية", "purchases", purchases.render, "المشتريات والموردون", "🧾", "purchases"),
+    ("العمليات اليومية", "inventory", inventory.render, "المخزن والأسعار والجرد", "📦", "inventory"),
+    ("العمليات اليومية", "warehouses", warehouses.render, "المخازن وأذون التحويل", "🏬", "warehouses"),
+    ("العمليات اليومية", "production", production.render, "التصنيع والوصفات", "🍳", "production"),
+    ("العمليات اليومية", "waste", waste.render, "الهدر والتالف", "🗑️", "waste"),
+    ("المالية", "treasury", treasury.render, "الخزينة والبنك", "💰", "treasury"),
+    ("المالية", "expenses", expenses.render, "المصروفات", "💸", "expenses"),
+    ("التحليل والتقارير", "reports", reports_center.render, "مركز التقارير", "🗂️", "reports"),
+    ("التحليل والتقارير", "menu", menu_engineering.render, "هندسة القائمة", "🎯", "menu"),
+    ("الإعداد", "clients", clients.render, "العملاء (المطاعم)", "🏪", "clients"),
 ]
-pages, module_of = [], {}
-for key, fn, title, icon, path in CATALOG:
+sections, module_of = {}, {}
+for section, key, fn, title, icon, path in CATALOG:
     if perm(key)[0]:
-        pages.append(st.Page(fn, title=title, icon=icon, url_path=path, default=(key == "dashboard")))
+        sections.setdefault(i18n.t(section), []).append(st.Page(fn, title=i18n.t(title), icon=icon, url_path=path, default=(key == "dashboard")))
         module_of[path] = key
-if not pages:
+if not module_of:
     st.warning("لا توجد وحدات متاحة لحسابك. تواصل مع المدير العام.")
-pages.append(st.Page(notifications.render, title="الإشعارات وطلبات التعديل", icon="🔔", url_path="inbox"))
-pages.append(st.Page(account.render, title="حسابي", icon="🔑", url_path="account", default=not module_of.get("dashboard")))
+sections[i18n.t("حسابي")] = [st.Page(notifications.render, title=i18n.t("الإشعارات وطلبات التعديل"), icon="🔔", url_path="inbox"),
+                             st.Page(account.render, title=i18n.t("حسابي"), icon="🔑", url_path="account", default=not module_of.get("dashboard"))]
 # صفحات المدير العام: لا تُضاف لغيره، ولكل منها حراسة داخلية
 if auth.is_admin():
-    pages += [st.Page(productivity.render, title="إنتاجية الموظفين والأمان", icon="📈", url_path="productivity"),
-              st.Page(admin_controls.render, title="الضوابط المالية", icon="⚖️", url_path="controls"),
-              st.Page(admin_users.render, title="المستخدمون والصلاحيات", icon="🛡️", url_path="admin")]
+    sections[i18n.t("المدير العام")] = [
+        st.Page(productivity.render, title=i18n.t("إنتاجية الموظفين والأمان"), icon="📈", url_path="productivity"),
+        st.Page(admin_controls.render, title=i18n.t("الضوابط المالية"), icon="⚖️", url_path="controls"),
+        st.Page(admin_users.render, title=i18n.t("المستخدمون والصلاحيات"), icon="🛡️", url_path="admin"),
+        st.Page(data_import.render, title=i18n.t("استيراد البيانات"), icon="📥", url_path="import")]
 
-current = st.navigation(pages)
+current = st.navigation(sections)
 mod = module_of.get(current.url_path)
 if mod and not perm(mod)[1]:
     st.info("لديك صلاحية العرض فقط في هذه الوحدة. أي محاولة تعديل ستُرفض وتُسجَّل.")

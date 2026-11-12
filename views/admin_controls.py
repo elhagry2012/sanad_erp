@@ -3,7 +3,7 @@ from datetime import date
 import streamlit as st
 
 from database.db import query
-from utils import theme, auth, controls, sequences
+from utils import theme, auth, controls, sequences, inventory
 
 
 def render():
@@ -16,7 +16,8 @@ def render():
         return
     cname = st.selectbox("المطعم", clients["name"], key="ctl_client")
     cid = int(clients.loc[clients["name"] == cname, "id"].iloc[0])
-    t1, t2, t3, t4 = st.tabs(["🔒 إقفال الفترات", "🚨 تنبيهات الحركات الكبيرة", "🧾 إعدادات الضريبة", "🔢 ترقيم المستندات"])
+    t1, t2, t3, t4, t5 = st.tabs(["🔒 إقفال الفترات", "🚨 تنبيهات الحركات الكبيرة", "🧾 إعدادات الضريبة", "🔢 ترقيم المستندات",
+                                  "📦 سياسة صرف المخزون"])
 
     with t1:
         st.info("الفترة المقفلة تمنع إضافة أو تعديل أو إلغاء أي مستند بتاريخ داخلها (مشتريات، مبيعات، مصروفات، هدر، تحويلات، قيود خزينة، جرد، مرتجعات)، "
@@ -70,6 +71,19 @@ def render():
 
     with t4:
         _sequences_tab(cid, me)
+
+    with t5:
+        st.info("تحدد أي دفعة تُصرف أولًا عند البيع والإنتاج والتحويل والهدر. «الأقرب انتهاءً» (FEFO) هو الأنسب للأغذية: "
+                "يقلل التالف لأن الدفعة التي ستنتهي أولًا تُستهلك أولًا (والدفعات بلا تاريخ صلاحية آخرًا). "
+                "«الأقدم استلامًا» (FIFO) يصرف حسب تاريخ الاستلام بغض النظر عن الصلاحية. "
+                "التغيير يسري على الصرف القادم فقط، والمرتجع المرتبط بفاتورة يُخصم من دفعة الفاتورة نفسها أولًا في الحالتين.")
+        cur = str(controls.get_setting(None, cid, "issue_policy", "fefo") or "fefo")
+        keys = list(inventory.ISSUE_POLICIES)
+        pol = st.radio("سياسة الصرف", keys, index=keys.index(cur) if cur in keys else 0, format_func=inventory.ISSUE_POLICIES.get,
+                       key="issue_pol")
+        if st.button("حفظ سياسة الصرف", key="issue_pol_save"):
+            controls.set_setting(cid, "issue_policy", pol, me)
+            st.success("تم الحفظ.")
 
 
 def _sequences_tab(cid, me):

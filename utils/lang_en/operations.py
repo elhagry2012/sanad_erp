@@ -1,0 +1,111 @@
+"""القاموس 3: المبيعات، الخزينة، المصروفات، العملاء، هندسة القائمة، الإشعارات، الضوابط المالية."""
+EN = {
+    # ---------------- المبيعات
+    "بدون تحصيل الآن (آجل)": "On account (credit sale)", "مختلط (نقدي + بنك)": "Split (cash + bank)", "🏦 بنك / فيزا": "🏦 Bank / card", "💵 نقدي": "💵 Cash",
+    "قناة الطلب": "Sales channel", "اسم التطبيق / التفاصيل": "Aggregator / details", "اختياري": "Optional", "مثال: طلبات، مرسول": "e.g. Talabat, Mrsool",
+    "طريقة التحصيل": "Collection method", "المبلغ المحصّل عبر البنك/الفيزا (الباقي نقدًا)": "Amount collected by bank/card (balance in cash)",
+    "أنشئ الوجبات أولًا من صفحة «التصنيع والوصفات».": "Create dishes first under «Production & BOM».",
+    "** (غيّره من صفحة المخازن). رصيد النقدية: ": "** (change it under Warehouses). Cash balance: ",
+    "تُخصم مكونات الوصفات من مخزن التشغيل: **": "Recipe components are issued from the operations store: **",
+    "إدخال المبيعات": "Sales Entry", "استيراد من ملف": "Import from File", "تحليل القنوات": "Channel Analysis", "سجل المبيعات": "Sales Register",
+    "تاريخ المبيعات": "Sales date", "اكتب جزءًا من اسم الوجبة": "Type part of the dish name", "🔎 بحث عن وجبة": "🔎 Search dishes",
+    "الكمية المباعة": "Qty sold", "في هذا الإدخال: ": "In this entry: ", "إجمالي هذا الإدخال": "Entry total", "تسجيل المبيعات وخصم المخزن": "Post Sales & Issue Stock",
+    " سطر بإيراد ": " line(s) with revenue of ", " وخصم المكونات من مخزن التشغيل.": " and issued components from the operations store.", "تم تسجيل ": "Posted ",
+    "ملف CSV أو Excel بأعمدة: الوجبة، الكمية، والتاريخ (اختياري). تنطبق القناة وطريقة التحصيل أدناه على كل الملف.":
+        "CSV or Excel file with columns: dish, quantity and date (optional). The channel and collection method below apply to the whole file.",
+    "التاريخ الافتراضي": "Default date", "ملف المبيعات": "Sales file", "لم أجد عمودي «الوجبة» و«الكمية».": "Could not find the «dish» and «quantity» columns.",
+    "وجبات غير معروفة ستُتجاهل: ": "Unknown dishes will be skipped: ", "تم استيراد هذا الملف في هذه الجلسة بالفعل.": "This file has already been imported in this session.",
+    "اعتماد الاستيراد وخصم المخزن": "Approve Import & Issue Stock", "تم استيراد ": "Imported ", "تعذّر قراءة الملف: ": "Could not read the file: ",
+    "سجل مبيعات الكاشير": "POS Sales Register", "إيراد الفترة": "Revenue for the period", "إلغاء سطر (يعيد المكونات للمخزن ويعكس التحصيل)": "Void line (returns components to stock and reverses the collection)",
+    "إلغاء السطر": "Void line", "لا توجد مبيعات في هذه الفترة.": "No sales in this period.", "غير محدد (قبل تفعيل القنوات)": "Unspecified (before channels were enabled)",
+    "الحصة %": "Share %", "حصة كل قناة من الإيراد": "Revenue share by channel", "الإيراد حسب القناة": "Revenue by channel", "تحليل المبيعات حسب قناة الطلب": "Sales Analysis by Channel",
+    "صالة (داخل المطعم)": "Dine-in", "دليفري (توصيل)": "Delivery", "تيك أواي (استلام)": "Takeaway", "تطبيقات خارجية (طلبات / مرسول / ...)": "Third-party aggregators",
+    "مبيعات كاشير": "POS sales", "مبيعات بنك / فيزا": "Card / bank sales",
+    # ---------------- الخزينة
+    "الوارد: مبيعات نقدية وقيود الإيداع. المنصرف: سداد نقدي لفواتير الشراء والدفعات والمصروفات.":
+        "Receipts: cash sales and deposits. Disbursements: cash settlement of purchase invoices, supplier payments and expenses.",
+    "💵 الخزينة النقدية": "💵 Cash on Hand (Petty Cash)",
+    "الوارد: مبيعات الفيزا/الدفع الإلكتروني وإيداعات. المنصرف: مدفوعات بنكية (تحويل/فيزا) ورسوم.":
+        "Receipts: card/electronic sales and deposits. Disbursements: bank payments (transfer/card) and charges.",
+    "🏦 حساب البنك": "🏦 Bank Account", "الرصيد الافتتاحي": "Opening balance", "إجمالي المنصرف": "Total disbursements", "الرصيد الحالي": "Current balance",
+    "الرصيد سالب. غالبًا الرصيد الافتتاحي غير مسجل. اضبطه من تبويب «الإعدادات».": "The balance is negative — the opening balance is probably missing. Set it on the «Settings» tab.",
+    "الرصيد في بداية الفترة: **": "Opening balance for the period: **", " — الرصيد في بداية الفترة: ": " — opening balance for the period: ",
+    "كشف حساب ": "Account statement — ", "الحركة اليومية": "Daily movement", "حذف قيد يدوي (رقم)": "Delete manual entry (no.)", "حذف القيد": "Delete entry",
+    "الإعدادات": "Settings", "تحويل بين الحسابين": "Inter-Account Transfer", "قيد يدوي": "Manual Journal Entry",
+    "مثال: إيداع نقدية الخزينة في البنك، أو سحب من البنك للخزينة. تُسجَّل حركتان مرتبطتان في معاملة واحدة.":
+        "e.g. deposit cash on hand into the bank, or withdraw from the bank to cash. Two linked entries are posted in a single transaction.",
+    "البيان": "Description", "تنفيذ التحويل": "Post Transfer", "تم التحويل.": "Transfer posted.", "إيداع (وارد)": "Deposit (receipt)", "سحب (منصرف)": "Withdrawal (disbursement)",
+    "نوع القيد": "Entry type", "إيداع": "Deposit", "حفظ القيد": "Post Entry", "تم حفظ القيد.": "Entry posted.",
+    "المبيعات والمشتريات والمصروفات تصل تلقائيًا من شاشاتها حسب طريقة الدفع، ولا تحتاج قيدًا يدويًا.":
+        "Sales, purchases and expenses are posted automatically from their own screens according to the payment method; no manual entry is needed.",
+    "الرصيد الافتتاحي للخزينة النقدية": "Opening cash balance", "الرصيد الافتتاحي لحساب البنك": "Opening bank balance", "حفظ الأرصدة الافتتاحية": "Save opening balances",
+    "الوارد": "Receipts", "المنصرف": "Disbursements", "وارد ": "Receipt ", "منصرف": "Disbursement", "بنك": "Bank", "بدون حركة نقدية (آجل)": "No cash movement (on account)",
+    "الخزينة النقدية": "Cash on hand", "حساب البنك": "Bank account", "مشتريات": "Purchases", "دفعة مورد": "Supplier payment", "مصروف": "Expense",
+    "مرتجع مشتريات": "Purchase return", "تحويل بين الحسابين ": "Inter-account transfer ",
+    # ---------------- المصروفات
+    "تسجيل مصروف": "Record Expense", "سجل المصروفات": "Expense Register", "إضافة بند مصروف جديد (إيجار، مرتبات، كهرباء...)": "Add a new expense category (rent, payroll, utilities...)",
+    "اسم البند": "Category name", "ثابت": "Fixed", "طبيعته": "Behavior", "متغير": "Variable", "إضافة البند": "Add Category", " — رصيد البنك: ": " — bank balance: ",
+    "رصيد النقدية: ": "Cash balance: ", "تسجيل المصروف": "Post Expense", "تم التسجيل.": "Posted.", "لا توجد مصروفات في هذه الفترة.": "No expenses in this period.",
+    "إجمالي المصروفات": "Total expenses", "رقم المستند": "Document no.", "سجّله": "Recorded by", "الملخص حسب البند": "Summary by category", " — من ": " — from ",
+    "حفظ تعديلات المصروفات": "Save expense changes", "حذف مصروف": "Delete expense", "حذف": "Delete",
+    # ---------------- العملاء
+    "العملاء": "Clients", "المطاعم التي تديرها الشركة": "Restaurants managed by the company", "اسم المطعم": "Restaurant name",
+    "النشاط (كريب، وجبات سريعة...)": "Cuisine / concept (crepes, fast food...)", "رصيد الخزينة النقدية الافتتاحي": "Opening cash balance", "رصيد البنك الافتتاحي": "Opening bank balance",
+    "إضافة عميل": "Add Client", "تمت الإضافة (مع مخزن رئيسي ومخزن تشغيل)، وهو يظهر الآن في قائمة المطاعم بشاشة الدخول.":
+        "Client added (with a main warehouse and an operations store); it now appears in the restaurant list on the sign-in screen.",
+    "يمكنك تعديل الاسم والنشاط مباشرة ثم الضغط على حفظ.": "Edit the name and concept directly, then click Save.", "النشاط": "Concept",
+    "حفظ التعديلات": "Save changes", " تعديل.": " change(s).", "تم حفظ ": "Saved ", "لا توجد تعديلات.": "No changes.",
+    # ---------------- هندسة القائمة
+    "لا توجد وجبات بعد.": "No dishes yet.", "لا توجد مبيعات في هذه الفترة. التصنيف يحتاج مبيعات.": "No sales in this period. Classification requires sales data.",
+    "بعض الوجبات بها مكونات بلا تكلفة، فهامشها مبالغ فيه: ": "Some dishes have zero-cost components, so their margin is overstated: ",
+    "% أي 70% من الحصة المتساوية). الربحية: هامش المساهمة للوحدة (الحد = المتوسط المرجح ": "%, i.e. 70% of an equal share). Profitability: unit contribution margin (threshold = weighted average ",
+    "الشعبية: حصة الوجبة من إجمالي الكمية المباعة (الحد = ": "Popularity: the dish's share of total quantity sold (threshold = ",
+    "الشعبية (% من المبيعات)": "Popularity (% of units sold)", "هامش المساهمة للوحدة": "Unit contribution margin", "مصفوفة هندسة القائمة": "Menu Engineering Matrix",
+    "الإيراد": "Revenue", "إجمالي الهامش": "Total contribution", "التوصية": "Recommendation", "السعر": "Price", "الشعبية %": "Popularity %", "الفئة": "Class",
+    "هامش الوحدة": "Unit margin", "إجمالي_الهامش": "Total contribution", "تصنيف الوجبات": "Dish Classification", "% — حد الهامش ": "% — margin threshold ",
+    "حد الشعبية ": "Popularity threshold ", "الوجبات": "Dishes", "ملخص الفئات": "Class summary", "تقرير هندسة القائمة": "Menu Engineering Report",
+    "نجوم": "Stars", "أحصنة العمل": "Plowhorses", "ألغاز": "Puzzles", "كلاب": "Dogs",
+    # ---------------- الإشعارات وطلبات التعديل
+    "السعر المعتمد": "Approved unit price", "الكمية المعتمدة": "Approved quantity", "الطلب لا يحتوي أسطر تعديل.": "The request contains no amendment lines.",
+    "القيم المقترحة من الموظف (يمكنك تعديلها قبل الاعتماد):": "Values proposed by the employee (you may edit them before approving):",
+    "لا يمكن تطبيق الطلب كما هو: ": "The request cannot be applied as is: ", "طلبات التعديل المعلّقة": "Pending Change Requests", "لا توجد طلبات معلّقة.": "No pending requests.",
+    " — طلبها **": " — requested by **", "** في ": "** on ", "السبب: ": "Reason: ", "التعديل المطلوب: ": "Requested change: ",
+    "ملاحظة القرار (تصل للموظف)": "Decision note (sent to the employee)", "السماح بالرصيد السالب عند التنفيذ (إن لزم)": "Allow negative stock on execution (if needed)",
+    "✅ قبول وتطبيق التعديل على الفاتورة": "✅ Approve & post amendment to invoice", "✅ قبول وتنفيذ الإلغاء/العكس الآن": "✅ Approve & execute void/reversal now",
+    "تعذّر التنفيذ (الطلب ما زال معلّقًا): ": "Could not execute (the request is still pending): ", "👍 قبول فقط (سأعدّل بنفسي)": "👍 Approve only (I will make the change)",
+    "⛔ رفض": "⛔ Reject", "✉️ طلبات التعديل": "✉️ Change Requests", "🔔 الإشعارات": "🔔 Notifications", "🛡️ قرارات المدير العام": "🛡️ Approval Queue",
+    "غير مقروء": "Unread", "تعليم الكل كمقروء": "Mark all as read", "لا توجد إشعارات.": "No notifications.", "**طلب تعديل جديد**": "**New change request**",
+    "لتصحيح كمية أو سعر في فاتورة شراء استخدم «طلب تعديل مباشر» من شاشة الفاتورة (المشتريات ← الفواتير)؛ يُطبَّق تلقائيًا عند اعتماده. هنا تُرسل طلبًا عامًا لأي مستند.":
+        "To correct a quantity or price on a purchase invoice, use «Request an invoice amendment» on the invoice screen (Procurement → Invoices); it is posted automatically once approved. Here you can send a general request for any document.",
+    "مثل PI-2026-00012 أو الرقم الداخلي": "e.g. PI-2026-00012 or the internal ID", "سبب الطلب": "Reason for request", "إرسال الطلب للمدير العام": "Submit to General Manager",
+    "تم الإرسال وإشعار المدير العام.": "Submitted and the General Manager notified.", "لا توجد طلبات.": "No requests.", "⏳ معلّق": "⏳ Pending", "⛔ مرفوض": "⛔ Rejected",
+    "✅ مقبول": "✅ Approved", "نوع الطلب": "Request type", "الطالب": "Requested by", "المستند": "Document", "التعديل المطلوب": "Requested change", "قرار بواسطة": "Decided by",
+    "طلب تعديل/إلغاء": "Change/void request", "تعديل مباشر (كميات/أسعار)": "Invoice amendment (qty/price)",
+    "فاتورة شراء": "Purchase invoice", "إذن تحويل بين المخازن": "Stock transfer order", "سطر مبيعات": "Sales line",
+    "إذن تحويل": "Stock transfer order", "دفعة مورد ": "Supplier payment ", "جرد": "Stock count", "تعديل مباشر لفاتورة شراء": "Purchase invoice amendment",
+    # ---------------- الضوابط المالية
+    "إقفال الفترات • تنبيهات الحركات الكبيرة • إعدادات الضريبة • ترقيم المستندات (المدير العام فقط)":
+        "Period close • High-value transaction alerts • Tax settings • Document numbering (General Manager only)",
+    "لا توجد مطاعم.": "No restaurants.", "🔒 إقفال الفترات": "🔒 Period Close", "🔢 ترقيم المستندات": "🔢 Document Numbering",
+    "🚨 تنبيهات الحركات الكبيرة": "🚨 High-Value Alerts", "🧾 إعدادات الضريبة": "🧾 Tax Settings", "📦 سياسة صرف المخزون": "📦 Inventory Issue Policy",
+    "الفترة المقفلة تمنع إضافة أو تعديل أو إلغاء أي مستند بتاريخ داخلها (مشتريات، مبيعات، مصروفات، هدر، تحويلات، قيود خزينة، جرد، مرتجعات)، بما فيها عمليات الإلغاء. افتحها مؤقتًا إن احتجت تصحيحًا ثم أعد إقفالها. كل إقفال وفتح يُسجَّل في سجل الأمان.":
+        "A closed period blocks creating, editing or voiding any document dated within it (purchases, sales, expenses, wastage, transfers, cash entries, stock counts, returns). Re-open it temporarily if a correction is needed, then close it again. Every close and re-open is recorded in the security log.",
+    "السنة": "Year", "الشهر": "Month", "ملاحظة الإقفال (اختياري)": "Closing note (optional)", "🔒 إقفال ": "🔒 Close ", "لا توجد فترات مقفلة.": "No closed periods.",
+    "أقفلها": "Closed by", "الفترة": "Period", "وقت الإقفال": "Closed at", "فتح فترة": "Re-open period", "🔓 فتح الفترة المحددة": "🔓 Re-open selected period",
+    "عند تسجيل حركة تساوي أو تتجاوز الحد المضبوط يصلك إشعار فوري (0 = معطّل).": "You are notified immediately when a transaction meets or exceeds the threshold (0 = disabled).",
+    "الحد الأدنى للتنبيه: ": "Alert threshold: ", "حفظ الحدود": "Save thresholds", "تم الحفظ.": "Saved.",
+    "نسبة ضريبة القيمة المضافة على المبيعات %": "Output VAT rate %", "أسعار بيع الوجبات شاملة الضريبة": "Dish selling prices are VAT-inclusive",
+    "حفظ إعدادات الضريبة": "Save tax settings", "تم الحفظ. تعتمد عليها التقارير الضريبية.": "Saved. Tax reports use these settings.",
+    "تحدد أي دفعة تُصرف أولًا عند البيع والإنتاج والتحويل والهدر. «الأقرب انتهاءً» (FEFO) هو الأنسب للأغذية: يقلل التالف لأن الدفعة التي ستنتهي أولًا تُستهلك أولًا (والدفعات بلا تاريخ صلاحية آخرًا). «الأقدم استلامًا» (FIFO) يصرف حسب تاريخ الاستلام بغض النظر عن الصلاحية. التغيير يسري على الصرف القادم فقط، والمرتجع المرتبط بفاتورة يُخصم من دفعة الفاتورة نفسها أولًا في الحالتين.":
+        "Determines which batch is issued first for sales, production, transfers and wastage. «First Expired, First Out» (FEFO) suits food best: it minimizes spoilage because the batch expiring soonest is consumed first (undated batches last). «First In, First Out» (FIFO) issues by receipt date regardless of expiry. Changes apply to future issues only; a return linked to an invoice is always issued from that invoice's batch first.",
+    "سياسة الصرف": "Issue policy", "حفظ سياسة الصرف": "Save issue policy",
+    "لكل نوع مستند تسلسل مستقل لهذا المطعم. الرقم يُحجز داخل نفس معاملة الحفظ فلا يتكرر حتى مع إدخال عدة مستخدمين في نفس اللحظة، ويُحسب من تاريخ المستند (سنويًا: PI-2026-00001، شهريًا: PI-202611-00001، أو تسلسل مستمر: PI-00001). تغيير الإعداد يؤثر على المستندات الجديدة فقط؛ المستندات السابقة تحتفظ بأرقامها.":
+        "Each document type has its own number series for this restaurant. Numbers are reserved inside the posting transaction, so they never duplicate even with concurrent users, and are based on the document date (yearly: PI-2026-00001, monthly: PI-202611-00001, or continuous: PI-00001). Changes apply to new documents only; existing documents keep their numbers.",
+    "**تعديل تسلسل**": "**Edit number series**", "نوع المستند": "Document type", "البادئة": "Prefix", "حتى 12 حرفًا بدون مسافات، ويمكن تركها فارغة": "Up to 12 characters, no spaces; may be left blank",
+    "عدد الأرقام": "Number of digits", "إعادة البدء": "Reset", "تحديد رقم بداية للمستند التالي في الفترة الحالية (مثلًا لاستكمال ترقيم دفتر ورقي)": "Set the starting number for the next document in the current period (e.g. to continue a paper book)",
+    "رقم المستند التالي": "Next document number", "آخر رقم في الفترة الحالية": "Last number in current period", "شكل الرقم التالي: **": "Next number format: **",
+    "حفظ إعداد الترقيم": "Save numbering settings", "الرقم التالي": "Next number", "عدد المستندات": "Documents",
+    "سنويًا": "Yearly", "شهريًا": "Monthly", "بدون إعادة (تسلسل مستمر)": "Never (continuous series)",
+    "مرتجع مشتريات ": "Purchase return ", "تشغيلة إنتاج ": "Production batch ", "دفعة مورد": "Supplier payment",
+    "حد التنبيه: مصروف": "Alert threshold: expense", "فاتورة شراء ": "Purchase invoice ", "دفعة لمورد": "Supplier payment", "سحب يدوي من الخزينة/البنك": "Manual cash/bank withdrawal",
+}

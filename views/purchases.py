@@ -15,7 +15,7 @@ def _num(x) -> float:
 
 
 # ======================================================== عرض الفاتورة
-def show_invoice(cid, inv_id):
+def show_invoice(cid, inv_id, where="list"):
     hdr, lines = reports.get_invoice(cid, int(inv_id))
     if hdr is None:
         st.warning("الفاتورة غير موجودة.")
@@ -35,7 +35,7 @@ def show_invoice(cid, inv_id):
         st.write(f"**طريقة الدفع:** {treasury.METHOD_AR.get(method, 'نقدي') if isinstance(method, str) else 'نقدي'}  |  **هاتف المورد:** {hdr['phone'] or '—'}")
         _tbl20 = lines
         st.dataframe(_tbl20.round(3), use_container_width=True, hide_index=True)
-        export_buttons(_tbl20, f"فاتورة شراء رقم {hdr['id']}", "purchase_invoice", subtitle=f"{hdr['supplier']} — {hdr['invoice_date']} — {auth.client_name()}", formats={"الكمية": FMT_QTY, "سعر الوحدة": FMT_MONEY, "الإجمالي": FMT_MONEY, "ما يعادل": FMT_QTY}, totals=["الإجمالي"], key=f"invx_{hdr['id']}", note=f"قبل الضريبة {hdr['subtotal']:,.2f} | ضريبة القيمة المضافة {hdr['vat_amount']:,.2f} | ضريبة الخصم {hdr['wht_amount']:,.2f} | إجمالي الفاتورة {_num(hdr['total']):,.2f} | صافي المستحق للمورد {hdr['net_due']:,.2f} | المدفوع {_num(hdr['paid']):,.2f} | المتبقي {hdr['remaining']:,.2f}")
+        export_buttons(_tbl20, f"فاتورة شراء رقم {hdr['id']}", "purchase_invoice", subtitle=f"{hdr['supplier']} — {hdr['invoice_date']} — {auth.client_name()}", formats={"الكمية": FMT_QTY, "سعر الوحدة": FMT_MONEY, "الإجمالي": FMT_MONEY, "ما يعادل": FMT_QTY}, totals=["الإجمالي"], key=f"invx_{where}_{hdr['id']}", note=f"قبل الضريبة {hdr['subtotal']:,.2f} | ضريبة القيمة المضافة {hdr['vat_amount']:,.2f} | ضريبة الخصم {hdr['wht_amount']:,.2f} | إجمالي الفاتورة {_num(hdr['total']):,.2f} | صافي المستحق للمورد {hdr['net_due']:,.2f} | المدفوع {_num(hdr['paid']):,.2f} | المتبقي {hdr['remaining']:,.2f}")
         m = st.columns(4)
         m[0].metric("المجموع قبل الضريبة", f"{hdr['subtotal']:,.2f}")
         m[1].metric(f"ضريبة القيمة المضافة ({_num(hdr.get('vat_rate')):g}%)", f"{hdr['vat_amount']:,.2f}")
@@ -113,7 +113,7 @@ def adjust_preview(pv):
         st.warning(f"نقص بالمخزن عند التخفيض: {s_}")
 
 
-def _adjust_editor(cid, inv_id, key):
+def _adjust_editor(cid, inv_id, key, where="list"):
     """جدول أسطر الفاتورة بقيمها الحالية؛ المستخدم يكتب الكمية/السعر الصحيح. يرجع (التغييرات، المعاينة أو None)."""
     src = query("""SELECT l.id, i.name, COALESCE(l.unit_name, i.unit) AS unit, l.qty, l.unit_price FROM purchase_lines l
                    JOIN items i ON i.id=l.item_id WHERE l.invoice_id=? ORDER BY l.id""", (int(inv_id),))
@@ -123,7 +123,7 @@ def _adjust_editor(cid, inv_id, key):
     NQ, NP = "الكمية الصحيحة", "السعر الصحيح"
     grid = pd.DataFrame({"الصنف": src["name"], "الوحدة": src["unit"], "الكمية الحالية": src["qty"].astype(float),
                          "السعر الحالي": src["unit_price"].astype(float), NQ: src["qty"].astype(float), NP: src["unit_price"].astype(float)})
-    ed = st.data_editor(grid, num_rows="fixed", hide_index=True, use_container_width=True, key=f"adj_ed_{key}_{inv_id}",
+    ed = st.data_editor(grid, num_rows="fixed", hide_index=True, use_container_width=True, key=f"adj_ed_{key}_{where}_{inv_id}",
                         disabled=[c for c in grid.columns if c not in (NQ, NP)],
                         column_config={NQ: st.column_config.NumberColumn(min_value=0.0, format="%.3f", help="بنفس وحدة السطر"),
                                        NP: st.column_config.NumberColumn(min_value=0.0, format="%.2f", help="سعر الوحدة قبل الضريبة"),
@@ -153,7 +153,7 @@ ADJUST_HELP = ("التعديل المباشر يصحح الكمية/السعر �
                "يُحفظ كل تعديل برقم مستقل مع القيم قبل وبعد.")
 
 
-def _invoice_tools(cid, user, inv_id, voided):
+def _invoice_tools(cid, user, inv_id, voided, where="list"):
     """المدير العام: تعديل مباشر/إلغاء/استبدال. غيره: طلب تعديل مباشر للكميات والأسعار، أو طلب عام، يصلان المدير العام فورًا."""
     if voided:
         return
@@ -162,7 +162,7 @@ def _invoice_tools(cid, user, inv_id, voided):
     if auth.is_admin():
         with st.expander("✏️ تعديل مباشر للكميات أو الأسعار (بدون إلغاء الفاتورة أو مرتجع)"):
             st.caption(ADJUST_HELP)
-            changes, pv = _adjust_editor(cid, inv_id, "adm")
+            changes, pv = _adjust_editor(cid, inv_id, "adm", where)
             if pv:
                 reason = st.text_input("سبب التعديل (إلزامي)", key=f"adj_r_{inv_id}")
                 neg = st.checkbox("السماح بالرصيد السالب إن كانت الكمية المخفّضة قد استُهلكت", key=f"adj_n_{inv_id}")
@@ -174,17 +174,17 @@ def _invoice_tools(cid, user, inv_id, voided):
                     except ValueError as e:
                         st.error(str(e))
         with st.expander("🛠 أدوات المدير العام: إلغاء أو استبدال هذه الفاتورة بالكامل"):
-            reason = st.text_input("السبب (إلزامي للإلغاء)", key=f"vr_{inv_id}")
-            neg = st.checkbox("السماح بالرصيد السالب إن كان جزء من الكمية قد استُهلك", key=f"vn_{inv_id}")
+            reason = st.text_input("السبب (إلزامي للإلغاء)", key=f"vr_{where}_{inv_id}")
+            neg = st.checkbox("السماح بالرصيد السالب إن كان جزء من الكمية قد استُهلك", key=f"vn_{where}_{inv_id}")
             c1, c2 = st.columns(2)
-            if c1.button("🗑 إلغاء الفاتورة وعكس أثرها بالكامل", key=f"vb_{inv_id}"):
+            if c1.button("🗑 إلغاء الفاتورة وعكس أثرها بالكامل", key=f"vb_{where}_{inv_id}"):
                 try:
                     documents.void_purchase(cid, inv_id, reason, user, neg)
                     st.session_state.pop("last_invoice", None)
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
-            if c2.button("♻️ استبدال الفاتورة (إلغاء الأصل وإنشاء بديل)", key=f"eb_{inv_id}"):
+            if c2.button("♻️ استبدال الفاتورة (إلغاء الأصل وإنشاء بديل)", key=f"eb_{where}_{inv_id}"):
                 _prefill_from_invoice(cid, inv_id)
                 st.session_state.pop("last_invoice", None)
                 st.rerun()
@@ -192,11 +192,11 @@ def _invoice_tools(cid, user, inv_id, voided):
     else:
         with st.expander("✏️ طلب تعديل مباشر للكميات أو الأسعار (بديل المرتجع — يُطبَّق تلقائيًا عند اعتماد المدير العام)"):
             st.caption(ADJUST_HELP)
-            changes, pv = _adjust_editor(cid, inv_id, "req")
+            changes, pv = _adjust_editor(cid, inv_id, "req", where)
             if pv:
-                reason = st.text_area("سبب التعديل (إلزامي)", key=f"arq_{inv_id}",
+                reason = st.text_area("سبب التعديل (إلزامي)", key=f"arq_{where}_{inv_id}",
                                       placeholder="مثال: الكمية المستلمة فعليًا 8 كراتين وليست 10 / خطأ في كتابة السعر")
-                if st.button("📨 إرسال طلب التعديل للمدير العام", type="primary", key=f"arqb_{inv_id}"):
+                if st.button("📨 إرسال طلب التعديل للمدير العام", type="primary", key=f"arqb_{where}_{inv_id}"):
                     try:
                         controls.create_adjust_request(cid, int(inv_id), changes, reason, user)
                         st.session_state[f"adj_done_{inv_id}"] = "تم إرسال طلب التعديل المباشر وإشعار المدير العام. تابع حالته من «الإشعارات وطلبات التعديل»."
@@ -204,9 +204,9 @@ def _invoice_tools(cid, user, inv_id, voided):
                     except ValueError as e:
                         st.error(str(e))
         with st.expander("✉️ طلب عام: إلغاء أو تعديل آخر لهذه الفاتورة (يصل المدير العام فورًا)"):
-            reason = st.text_area("لماذا تحتاج التعديل؟", key=f"rq_{inv_id}")
-            proposed = st.text_input("التعديل المطلوب (اختياري)", key=f"rqp_{inv_id}")
-            if st.button("إرسال الطلب", key=f"rqb_{inv_id}"):
+            reason = st.text_area("لماذا تحتاج التعديل؟", key=f"rq_{where}_{inv_id}")
+            proposed = st.text_input("التعديل المطلوب (اختياري)", key=f"rqp_{where}_{inv_id}")
+            if st.button("إرسال الطلب", key=f"rqb_{where}_{inv_id}"):
                 try:
                     controls.create_edit_request(cid, "purchase_invoice", inv_id, reason, proposed, user)
                     st.success("تم إرسال الطلب وإشعار المدير العام. تابع حالته من «الإشعارات وطلبات التعديل».")
@@ -219,8 +219,8 @@ def _invoice_form(cid, user):
     if last:
         no = query("SELECT doc_no FROM purchase_invoices WHERE id=?", (int(last),))
         st.success(f"تم حفظ الفاتورة {sequences.label(no['doc_no'].iloc[0] if not no.empty else None, last)} وتحديث المخزن والأسعار والخزينة/البنك.")
-        show_invoice(cid, last)
-        _invoice_tools(cid, user, int(last), voided=False)
+        show_invoice(cid, last, "last")
+        _invoice_tools(cid, user, int(last), voided=False, where="last")
         if st.button("إخفاء وإدخال فاتورة جديدة"):
             st.session_state.pop("last_invoice")
             st.rerun()
@@ -236,7 +236,8 @@ def _invoice_form(cid, user):
             st.rerun()
 
     sup = query("SELECT id, name FROM suppliers WHERE client_id=? ORDER BY name", (cid,))
-    items = query("SELECT id, name, unit, last_price, track_expiry, shelf_life_days FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))
+    items = query("SELECT id, name, unit, last_price, track_expiry, barcode FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))
+    codes = {n: b for n, b in zip(items["name"], items["barcode"]) if isinstance(b, str) and b}
     units = query("""SELECT u.item_id, u.unit_name, u.factor, u.is_purchase_default FROM item_units u JOIN items i ON i.id=u.item_id
                      WHERE i.client_id=? ORDER BY u.is_purchase_default DESC, u.id""", (cid,))
     whs = reports.warehouse_list(cid)
@@ -266,70 +267,91 @@ def _invoice_form(cid, user):
     wname = d.selectbox("مخزن الاستلام", list(whs["name"]), key=K("wh"), **ws(K("wh"), index=main_idx))
 
     st.markdown("**بنود الفاتورة** (الكمية والسعر بوحدة الشراء المختارة، وتُحوَّل تلقائيًا لوحدة الاستهلاك)")
-    tracked = int(items["track_expiry"].fillna(0).astype(int).sum()) if not items.empty else 0
-    st.caption("تاريخ الصلاحية: إلزامي للأصناف التي تتتبع الصلاحية (له تاريخ افتراضي حسب مدة الصلاحية)، واختياري لبقية الأصناف. "
-               "كل سطر له تاريخ يُنشئ دفعة تظهر في تقرير الصلاحية وتُصرف بنظام الأقرب انتهاءً." +
-               ("" if tracked else " ⚠️ لا يوجد حاليًا أي صنف مفعّل له «يتتبع الصلاحية» — فعّله من تبويب الخامات للأصناف التي تحتاجه."))
-    w = [2.3, 1.2, 1.0, 1.2, 1.2, 1.4, 0.5]
-    for col, t in zip(st.columns(w), ["الصنف", "الوحدة", "الكمية", "سعر الوحدة", "الإجمالي", "تاريخ الصلاحية", ""]):
-        col.markdown(f"<small><b>{t}</b></small>", unsafe_allow_html=True)
+    st.caption("📅 **تاريخ الصلاحية يُكتب لكل سطر من على عبوة/فاتورة هذه الدفعة** — لا يُحسب تلقائيًا. "
+               "إلزامي (⭐) للأصناف التي تتتبع الصلاحية، واختياري لغيرها. كل سطر يصبح دفعة مستقلة بتاريخها في المخزن، "
+               "فيظهر رصيدها المتبقي في «المخزن ← الدفعات والصلاحية» وتُصرف حسب سياسة الصرف (FEFO/FIFO).")
+    mobile = theme.is_mobile()
+    w = [2.3, 1.2, 1.0, 1.2, 1.2, 1.5, 0.5]
+    SLOTS = ["item", "unit", "qty", "price", "total", "exp", "x"]
+    box = st.container(key="pi_lines")                      # على الحاسوب: شبكة لا تلتف (تمرير أفقي على الشاشات الضيقة)
+    if not mobile:
+        for col, t in zip(box.columns(w), ["الصنف", "الوحدة", "الكمية", "سعر الوحدة", "الإجمالي", "تاريخ الصلاحية", ""]):
+            col.markdown(f"<small><b>{t}</b></small>", unsafe_allow_html=True)
+    lv = "visible" if mobile else "collapsed"
 
     opts = [NEW_ITEM] + list(items["name"])
-    lines, remove = [], None
-    for rid in rows:
-        cc = st.columns(w)
-        sel = cc[0].selectbox("الصنف", opts, index=None, placeholder="اختر صنفًا أو أضف صنفًا جديدًا",
-                              key=K("sel", rid), label_visibility="collapsed")
-        new_info = None
+    lines, remove, exp_issues = [], None, []
+    for n_line, rid in enumerate(rows, start=1):
+        if mobile:                                         # الجوال/اللوحي: بطاقة لكل سطر بعناوين ظاهرة وأزرار كبيرة
+            line = box.container(border=True)
+            line.markdown(f"<div class='sanad-card-title'>بند {n_line}</div>", unsafe_allow_html=True)
+            top = line.container()
+            r2, r3, r4 = line.columns(2), line.columns(2), line.columns([3, 1], vertical_alignment="center")
+            slot = {"item": top, "unit": r2[0], "qty": r2[1], "price": r3[0], "exp": r3[1], "total": r4[0], "x": r4[1]}
+        else:
+            line = box
+            slot = dict(zip(SLOTS, box.columns(w)))
+        sel = slot["item"].selectbox("الصنف", opts, index=None, placeholder="اختر صنفًا أو اكتب/امسح الباركود",
+                                     key=K("sel", rid), label_visibility=lv,
+                                     format_func=lambda o: f"{o} · {codes[o]}" if o in codes else o)
         if sel and sel != NEW_ITEM:
             r = items.loc[items["name"] == sel].iloc[0]
             u = units[units["item_id"] == r["id"]]
             uopts = list(u["unit_name"]) + [r["unit"]] if not u.empty else [r["unit"]]
-            unit = cc[1].selectbox("الوحدة", uopts, key=K("u", rid, sel), label_visibility="collapsed")
+            unit = slot["unit"].selectbox("الوحدة", uopts, key=K("u", rid, sel), label_visibility=lv)
             factor = float(u.loc[u["unit_name"] == unit, "factor"].iloc[0]) if unit in set(u["unit_name"]) else 1.0
         else:
             unit, factor, r = None, 1.0, None
-            cc[1].markdown("<div style='padding-top:.5rem'>—</div>", unsafe_allow_html=True)
-        qty = cc[2].number_input("الكمية", min_value=0.0, step=1.0, format="%.3f", key=K("q", rid), label_visibility="collapsed")
-        price = cc[3].number_input("السعر", min_value=0.0, step=1.0, format="%.2f", key=K("p", rid), label_visibility="collapsed")
-        cc[4].markdown(f"<div style='padding-top:.5rem'><b>{qty * price:,.2f}</b></div>", unsafe_allow_html=True)
-        expiry = None
-        if r is not None:
-            ek = K("exp", rid, sel)                          # المفتاح يتبع الصنف فلا ينتقل تاريخ صنف لآخر عند تغيير السطر
-            if int(r["track_expiry"] or 0):
-                default_exp = date.today() + timedelta(days=int(r["shelf_life_days"] or 30))
-                expiry = cc[5].date_input("الصلاحية", key=ek, label_visibility="collapsed",
-                                          help="إلزامي: صنف يتتبع الصلاحية", **ws(ek, value=default_exp))
-            else:
-                expiry = cc[5].date_input("الصلاحية", key=ek, label_visibility="collapsed",
-                                          help="اختياري لهذا الصنف. لجعله إلزاميًا فعّل «يتتبع الصلاحية» من تبويب الخامات.",
-                                          **ws(ek, value=None))
-        else:
-            cc[5].markdown("<div style='padding-top:.5rem;color:#888'>—</div>", unsafe_allow_html=True)
-        if cc[6].button("✖", key=K("x", rid), help="حذف السطر"):
+            if not mobile:
+                slot["unit"].markdown("<div style='padding-top:.5rem'>—</div>", unsafe_allow_html=True)
+        qty = slot["qty"].number_input("الكمية", min_value=0.0, step=1.0, format="%.3f", key=K("q", rid), label_visibility=lv)
+        price = slot["price"].number_input("سعر الوحدة", min_value=0.0, step=1.0, format="%.2f", key=K("p", rid), label_visibility=lv)
+        slot["total"].markdown(f"<div style='padding-top:.5rem'>{'الإجمالي: ' if mobile else ''}<b>{qty * price:,.2f}</b></div>",
+                               unsafe_allow_html=True)
+        # تاريخ الصلاحية: حقل صريح لكل سطر، فارغ حتى يكتبه المستخدم (المفتاح يتبع الصنف فلا ينتقل تاريخ صنف لآخر)
+        expiry, required, label = None, False, sel
+        if sel == NEW_ITEM:
+            required = bool(st.session_state.get(K("nte", rid)))
+            label = st.session_state.get(K("nn", rid)) or "صنف جديد"
+        elif r is not None:
+            required = bool(int(r["track_expiry"] or 0))
+        if sel:
+            ek = K("exp", rid, sel)
+            expiry = slot["exp"].date_input("تاريخ الصلاحية" + (" ⭐" if required else ""), key=ek, label_visibility=lv,
+                                            **ws(ek, value=None), min_value=inv_date, format="YYYY-MM-DD",
+                                            help=("⭐ إلزامي: هذا الصنف يتتبع الصلاحية." if required else "اختياري لهذا الصنف.") +
+                                                 " اكتب التاريخ المطبوع على هذه الدفعة.")
+            if required and expiry is None and qty > 0:
+                exp_issues.append(f"أدخل تاريخ صلاحية «{label}» (صنف يتتبع الصلاحية).")
+            if expiry is not None and expiry <= date.today() and qty > 0:
+                line.warning(f"⚠️ تاريخ صلاحية «{label}» ({expiry}) {'اليوم' if expiry == date.today() else 'منتهٍ بالفعل'}.")
+        elif not mobile:
+            slot["exp"].markdown("<div style='padding-top:.5rem;color:#888'>—</div>", unsafe_allow_html=True)
+        if slot["x"].button("🗑 حذف" if mobile else "✖", key=K("x", rid), help="حذف السطر", use_container_width=mobile):
             remove = rid
         if sel == NEW_ITEM:
-            x, y, z, q2 = st.columns([2.2, 1.3, 1.5, 1.3])
+            if mobile:
+                x = line
+                y, z = line.columns(2)
+                q2, e1 = line.columns(2, vertical_alignment="bottom")
+            else:
+                x, y, z, q2, e1 = line.columns([2.2, 1.3, 1.5, 1.3, 1.3])
             nn = x.text_input("اسم الصنف الجديد (يُضاف للمخزن تلقائيًا)", key=K("nn", rid))
             nu = y.selectbox("وحدة الاستهلاك", BASE_UNITS, key=K("nu", rid))
             npu = z.text_input("وحدة الشراء (اختياري)", key=K("npu", rid), placeholder="كرتونة، زجاجة...")
             nf = q2.number_input(f"1 وحدة شراء = كم {nu}", min_value=0.0, format="%.3f", key=K("nf", rid), **ws(K("nf", rid), value=1.0))
-            e1, e2, e3 = st.columns([1.6, 1.6, 2.8])
-            nte = e1.checkbox("له تاريخ صلاحية", key=K("nte", rid))
-            nsl = e2.number_input("مدة الصلاحية الافتراضية (يوم)", min_value=0, step=1, key=K("nsl", rid), disabled=not nte, **ws(K("nsl", rid), value=30))
-            nexp = e3.date_input("تاريخ صلاحية هذه الدفعة", key=K("nexp", rid), disabled=not nte,
-                                 **ws(K("nexp", rid), value=date.today() + timedelta(days=30))) if nte else None
+            nte = e1.checkbox("يتتبع الصلاحية", key=K("nte", rid), help="يجعل تاريخ الصلاحية إلزاميًا لهذا الصنف في كل فاتورة")
             lines.append({"new_name": nn, "new_unit": nu, "new_purchase_unit": npu, "new_factor": nf, "new_track_expiry": nte,
-                          "new_shelf_life": int(nsl) if nte else None, "expiry": str(nexp) if nexp else None,
+                          "new_shelf_life": None, "expiry": str(expiry) if expiry else None,
                           "unit": npu or None, "qty": qty, "price": price})
         elif r is not None:
-            st.caption(f"1 {unit} = {factor:g} {r['unit']} — الكمية بوحدة الاستهلاك: {qty * factor:,.3f} {r['unit']} — "
-                       f"آخر سعر للوحدة الأساسية: {_num(r['last_price']):,.4f}")
+            line.caption(f"1 {unit} = {factor:g} {r['unit']} — الكمية بوحدة الاستهلاك: {qty * factor:,.3f} {r['unit']} — "
+                         f"آخر سعر للوحدة الأساسية: {_num(r['last_price']):,.4f}" + (f" — 📅 دفعة تنتهي {expiry}" if expiry else ""))
             lines.append({"item_id": int(r["id"]), "unit": unit, "qty": qty, "price": price, "expiry": str(expiry) if expiry else None})
     if remove is not None:
         rows.remove(remove)
         st.rerun()
-    if st.button("➕ إضافة سطر"):
+    if st.button("➕ إضافة سطر", use_container_width=mobile):
         rows.append(nxt)
         st.session_state["pi_next"] = nxt + 1
         st.rerun()
@@ -366,7 +388,9 @@ def _invoice_form(cid, user):
     if up:
         st.image(up, width=220)
 
-    if st.button("💾 حفظ الفاتورة", type="primary", key=K("save")):
+    for msg in exp_issues:
+        st.error(msg)
+    if st.button("💾 حفظ الفاتورة", type="primary", key=K("save"), disabled=bool(exp_issues)):
         try:
             sid = int(sup.loc[sup["name"] == sname, "id"].iloc[0])
             wid = int(whs.loc[whs["name"] == wname, "id"].iloc[0])
@@ -668,23 +692,23 @@ def render():
             u = b.selectbox("وحدة الاستهلاك", BASE_UNITS)
             pu = c.text_input("وحدة الشراء (اختياري)", placeholder="كرتونة")
             fac = d.number_input("1 وحدة شراء = كم وحدة استهلاك", min_value=0.0, value=1.0, format="%.3f")
-            m = st.number_input("حد إعادة الطلب (بوحدة الاستهلاك)", min_value=0.0, step=1.0)
-            t_a, t_b = st.columns(2)
-            track = t_a.checkbox("يتتبع تاريخ الصلاحية (يُطلب التاريخ عند التوريد وتُتتبع الدفعات)")
-            shelf = t_b.number_input("مدة الصلاحية الافتراضية (يوم)", min_value=0, value=30, step=1)
+            m1, m2 = st.columns(2)
+            m = m1.number_input("حد إعادة الطلب (بوحدة الاستهلاك)", min_value=0.0, step=1.0)
+            bc = m2.text_input("الباركود (اختياري)", max_chars=64)
+            track = st.checkbox("يتتبع تاريخ الصلاحية (يصبح تاريخ الصلاحية إلزاميًا في كل سطر شراء لهذا الصنف)")
             if st.form_submit_button("إضافة خامة"):
                 try:
-                    services.add_item(cid, n, u, m, user, purchase_unit=pu, factor=fac, track_expiry=track, shelf_life_days=int(shelf) if track else None)
+                    services.add_item(cid, n, u, m, user, purchase_unit=pu, factor=fac, track_expiry=track, barcode=bc)
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
-        df = query("SELECT id, name, unit, min_qty, track_expiry, shelf_life_days FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))
+        df = query("SELECT id, name, barcode, unit, min_qty, track_expiry FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))
         df["track_expiry"] = df["track_expiry"].fillna(0).astype(bool)
         if not df.empty:
             ed = st.data_editor(df, hide_index=True, use_container_width=True, key="ed_items",
-                                column_config={"id": None, "name": "الخامة", "unit": "وحدة الاستهلاك", "min_qty": "حد إعادة الطلب",
-                                               "track_expiry": st.column_config.CheckboxColumn("يتتبع الصلاحية"),
-                                               "shelf_life_days": st.column_config.NumberColumn("مدة الصلاحية (يوم)", min_value=0, step=1)})
+                                column_config={"id": None, "name": "الخامة", "barcode": st.column_config.TextColumn("الباركود", max_chars=64),
+                                               "unit": "وحدة الاستهلاك", "min_qty": "حد إعادة الطلب",
+                                               "track_expiry": st.column_config.CheckboxColumn("يتتبع الصلاحية (التاريخ إلزامي عند الشراء)")})
             if st.button("حفظ تعديلات الخامات"):
                 try:
                     k = services.apply_edits("items", df, ed, user, cid)
