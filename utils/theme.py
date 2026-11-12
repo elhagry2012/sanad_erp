@@ -165,6 +165,20 @@ def header_controls() -> None:
                   help="العربية" if i18n.is_en() else "English")
 
 
+# أغلفة حقول الإدخال (العنصر الذي يحمل خلفية الحقل). Streamlit 1.66 يبني الحقول بـ React Aria، والإصدارات الأقدم بـ BaseWeb.
+FIELD_SHELLS = ", ".join([
+    '[data-testid="stTextInputRootElement"]', '[data-testid="stNumberInputContainer"]', '[data-testid="stDateInputField"]',
+    '[data-testid="stTimeInputField"]', '[data-testid="stTextAreaRootElement"]',
+    '[data-testid="stSelectbox"] .react-aria-ComboBox > div', '[data-testid="stMultiSelect"] .react-aria-ComboBox > div',
+    '[data-baseweb="input"] > div', '[data-baseweb="select"] > div', '[data-baseweb="textarea"]',
+])
+
+
+def _within(scope: str, sels: str, suffix: str = "") -> str:
+    """يبني محددات CSS: كل غلاف داخل نطاق معيّن، مع لاحقة اختيارية (مثل « :is(input, span)»)."""
+    return ", ".join(f"{scope} {x.strip()}{suffix}".strip() for x in sels.split(", "))
+
+
 # ============================================================ ورقة الأنماط
 def _css(p: dict, rtl: bool, dark: bool) -> str:
     start = "right" if rtl else "left"
@@ -179,11 +193,35 @@ def _css(p: dict, rtl: bool, dark: bool) -> str:
     [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {{ color: {p['muted']} !important; }}
     h1, h2, h3, h4, h5 {{ color: {p['heading']} !important; font-weight: 700; letter-spacing: {'0' if rtl else '-.01em'}; }}
     [data-testid="stSidebar"] {{ direction: {'rtl' if rtl else 'ltr'}; background: {p['sidebar']}; border-inline-end: 1px solid {p['border']}; }}
+    /* sidebar: navy in both modes, so all text/icons are light. Selectors are more specific than the general
+       body-text rules above (.stApp span, headings, captions, buttons) so they cannot be overridden by them. */
     [data-testid="stSidebar"] * {{ color: {p['sidebar_text']}; }}
+    [data-testid="stSidebar"] :is(p, span, label, li, a, div, small, strong, b, em, h1, h2, h3, h4, h5, h6),
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] *, [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * {{
+        color: {p['sidebar_text']} !important; }}
+    [data-testid="stSidebar"] svg {{ fill: currentColor; color: {p['sidebar_text']} !important; }}
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"], [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {{
+        color: #C9D2E3 !important; }}
     [data-testid="stSidebar"] hr {{ border-color: {p['accent']}55; }}
-    [data-testid="stSidebar"] [data-baseweb="select"] *, [data-testid="stSidebar"] input {{ color: {NAVY if not dark else p['text']} !important; }}
-    [data-testid="stSidebar"] .stButton > button {{ background: {p['accent']}; color: {NAVY}; }}
-    [data-testid="stSidebarNav"] [data-testid="stNavSectionHeader"], [data-testid="stSidebarNav"] header {{ color: {p['accent']} !important; opacity: .95; }}
+    /* navigation: readable links, clear hover and active page, gold section headers */
+    [data-testid="stSidebarNav"] a {{ border-radius: 8px; opacity: 1 !important; }}
+    [data-testid="stSidebarNav"] a :is(span, p, div) {{ color: #F4F6FB !important; font-weight: 500; }}
+    [data-testid="stSidebarNav"] a:hover {{ background: #FFFFFF14 !important; }}
+    [data-testid="stSidebarNav"] a[aria-current="page"] {{ background: {p['accent']}2E !important; border-inline-start: 3px solid {p['accent']}; }}
+    [data-testid="stSidebarNav"] a[aria-current="page"] :is(span, p, div) {{ color: #FFFFFF !important; font-weight: 700; }}
+    [data-testid="stSidebarNav"] a:focus-visible {{ outline: 2px solid {p['accent']}; outline-offset: 1px; }}
+    [data-testid="stSidebar"] [data-testid="stNavSectionHeader"], [data-testid="stSidebar"] [data-testid="stNavSectionHeader"] *,
+    [data-testid="stSidebarNav"] header, [data-testid="stSidebarNav"] header * {{
+        color: {p['accent']} !important; font-weight: 700; letter-spacing: .02em; }}
+    /* sidebar form fields: white field + navy text (light) / dark field + light text (dark) */
+    {_within('[data-testid="stSidebar"]', FIELD_SHELLS)} {{
+        background: {'#FFFFFF' if not dark else p['surface2']} !important; border-color: {'#FFFFFF' if not dark else p['border']} !important; }}
+    {_within('[data-testid="stSidebar"]', FIELD_SHELLS, ' :is(input, textarea, span, div, svg, path, button)')} {{
+        color: {NAVY if not dark else p['text']} !important; -webkit-text-fill-color: {NAVY if not dark else p['text']}; background-color: transparent; }}
+    /* sidebar buttons: navy text on gold (higher contrast than white on gold) */
+    [data-testid="stSidebar"] .stButton > button {{ background: {p['accent']}; color: {NAVY} !important; border: 0; }}
+    [data-testid="stSidebar"] .stButton > button * {{ color: {NAVY} !important; }}
+    [data-testid="stSidebar"] .stButton > button:hover {{ background: #E0BE6A; }}
     div[data-testid="stMetric"] {{ background: {p['surface2']}; border-inline-start: 5px solid {p['accent']};
         padding: 14px 18px; border-radius: 8px; {'box-shadow: 0 1px 0 ' + p['border'] + ' inset;' if dark else ''} }}
     div[data-testid="stMetricValue"] {{ color: {p['heading']}; font-weight: 700; font-variant-numeric: tabular-nums; }}
@@ -258,17 +296,23 @@ def _css(p: dict, rtl: bool, dark: bool) -> str:
     """
     if dark:
         css += f"""
-    /* dark mode: form controls, menus, alerts, tables */
-    [data-baseweb="input"] > div, [data-baseweb="base-input"], [data-baseweb="select"] > div, [data-baseweb="textarea"],
-    .stNumberInput input, .stDateInput input, .stTextInput input, .stTextArea textarea, .stTimeInput input {{
-        background: {p['surface2']} !important; color: {p['text']} !important; border-color: {p['border']} !important; }}
-    input::placeholder, textarea::placeholder {{ color: {p['muted']} !important; opacity: 1; }}
-    [data-testid="stNumberInput"] button {{ background: {p['surface']} !important; color: {p['text']} !important; border-color: {p['border']} !important; }}
-    [data-baseweb="popover"] ul, [data-baseweb="popover"] [role="listbox"], [data-baseweb="menu"], [data-baseweb="calendar"],
-    [data-baseweb="popover"] > div {{ background: {p['surface']} !important; color: {p['text']} !important; }}
-    [data-baseweb="popover"] li, [data-baseweb="calendar"] * {{ color: {p['text']} !important; }}
+    /* dark mode: form fields (React Aria shells in Streamlit 1.66, BaseWeb fallback), dropdown lists, calendar, tags */
+    {FIELD_SHELLS} {{ background: {p['surface2']} !important; border-color: {p['border']} !important; }}
+    {_within('', FIELD_SHELLS, ' :is(input, textarea, span, div)')} {{
+        color: {p['text']} !important; -webkit-text-fill-color: {p['text']}; background-color: transparent !important; }}
+    {_within('', FIELD_SHELLS, ' :is(svg, button)')} {{ color: {p['muted']} !important; }}
+    input::placeholder, textarea::placeholder {{ color: {p['muted']} !important; -webkit-text-fill-color: {p['muted']}; opacity: 1; }}
+    [data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"], [data-testid="stNumberInput"] button {{
+        background: {p['surface']} !important; color: {p['text']} !important; border-color: {p['border']} !important; }}
+    [data-testid="stMultiSelectTagsContainer"] [role="group"], [data-baseweb="tag"] {{ background: {p['border']} !important; color: {p['text']} !important; }}
+    .react-aria-Popover, [role="listbox"], [role="dialog"]:has([role="grid"]),
+    [data-baseweb="popover"] ul, [data-baseweb="popover"] [role="listbox"], [data-baseweb="menu"], [data-baseweb="calendar"] {{
+        background: {p['surface']} !important; color: {p['text']} !important; border: 1px solid {p['border']} !important; }}
+    .react-aria-Popover *, [role="listbox"] *, [role="dialog"]:has([role="grid"]) *, [data-baseweb="popover"] li, [data-baseweb="calendar"] * {{
+        color: {p['text']} !important; }}
+    [role="option"]:hover, [role="option"][data-focused], [role="option"][data-hovered], [role="option"][aria-selected="true"],
     [data-baseweb="popover"] li:hover, [data-baseweb="popover"] li[aria-selected="true"] {{ background: {p['surface2']} !important; }}
-    [data-baseweb="tag"] {{ background: {p['surface2']} !important; }}
+    [role="grid"] [aria-selected="true"], [role="grid"] [data-selected] {{ background: {p['primary']} !important; color: {p['on_primary']} !important; }}
     [data-testid="stExpander"] details, [data-testid="stExpander"] summary {{ background: {p['surface']}; }}
     [data-testid="stExpander"] summary:hover * {{ color: {p['accent']} !important; }}
     [data-testid="stFileUploaderDropzone"] {{ background: {p['surface2']} !important; border-color: {p['border']} !important; }}
