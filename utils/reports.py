@@ -101,14 +101,16 @@ def supplier_statement(cid, supplier_id, start, end):
 # ---------------------------------------------------------------- كارت الصنف
 MOVE_AR = {"purchase": "شراء", "production_in": "دخول إنتاج", "production_out": "صرف للإنتاج", "sale": "بيع",
            "waste": "هدر", "adjustment": "تسوية جرد", "transfer_in": "تحويل وارد", "transfer_out": "تحويل صادر",
-           "opening": "رصيد افتتاحي"}
+           "opening": "رصيد افتتاحي", "purchase_return": "مرتجع مشتريات", "reversal": "عكس مستند",
+           "purchase_adjust": "تعديل فاتورة شراء"}
 
 
 def _doc_label(row, inv_map):
     t, ref = row["move_type"], row["ref_id"]
-    if t == "purchase":
+    if t in ("purchase", "purchase_adjust"):
         no, sup = inv_map.get(int(ref) if pd.notna(ref) else -1, ("", ""))
-        return f"فاتورة شراء {no or int(ref)}" + (f" - {sup}" if sup else "")
+        head = "تعديل فاتورة شراء" if t == "purchase_adjust" else "فاتورة شراء"
+        return f"{head} {no or int(ref)}" + (f" - {sup}" if sup else "")
     base = {"production_in": "تشغيلة إنتاج", "production_out": "تشغيلة إنتاج", "sale": "مبيعات كاشير", "waste": "هدر",
             "adjustment": "جرد وتسوية", "transfer_in": "إذن تحويل", "transfer_out": "إذن تحويل",
             "opening": "استيراد رصيد افتتاحي"}.get(t, t)
@@ -139,8 +141,8 @@ def item_card(cid, item_id, start, end, warehouse_id=None):
     before = mv[mv["move_date"] < start]["qty"].sum() if not mv.empty else 0.0
     opening = base + float(before)
     cur = mv[(mv["move_date"] >= start) & (mv["move_date"] <= end)].copy()
-    inv_df = query("""SELECT p.id, p.invoice_no, s.name AS sup FROM purchase_invoices p JOIN suppliers s ON s.id=p.supplier_id
-                      WHERE p.client_id=?""", (cid,))
+    inv_df = query("""SELECT p.id, COALESCE(p.doc_no, p.invoice_no) AS invoice_no, s.name AS sup FROM purchase_invoices p
+                      JOIN suppliers s ON s.id=p.supplier_id WHERE p.client_id=?""", (cid,))
     inv_map = {int(r["id"]): (r["invoice_no"], r["sup"]) for _, r in inv_df.iterrows()}
     meta = item.to_dict()
     meta["current_qty"] = current
@@ -463,11 +465,37 @@ def smart_alerts(cid) -> dict:
 
 # ================================================================= مرتجعات المشتريات
 def returns_list(cid, start, end) -> pd.DataFrame:
-    return query("""SELECT r.id AS "رقم", r.return_date AS "التاريخ", s.name AS "المورد", r.invoice_id AS "الفاتورة", r.reason AS "السبب",
+    return query("""SELECT r.id AS "رقم", COALESCE(r.doc_no,'') AS "رقم المرتجع", r.return_date AS "التاريخ", s.name AS "المورد",
+                    COALESCE(p.doc_no, CAST(r.invoice_id AS TEXT), '') AS "الفاتورة", r.reason AS "السبب",
                     r.subtotal AS "قبل الضريبة", r.vat_amount AS "الضريبة", r.total AS "الإجمالي", r.net_credit AS "صافي الإشعار الدائن",
                     r.refund_amount AS "المسترد", CASE r.status WHEN 'active' THEN '' ELSE 'ملغي' END AS "الحالة", r.created_by AS "أدخله"
-                    FROM purchase_returns r JOIN suppliers s ON s.id=r.supplier_id
+                    FROM purchase_returns r JOIN suppliers s ON s.id=r.supplier_id LEFT JOIN purchase_invoices p ON p.id=r.invoice_id
                     WHERE r.client_id=? AND r.return_date BETWEEN ? AND ? ORDER BY r.id DESC""", (cid, str(start), str(end)))
+
+
+def invoice_return_lines(cid, invoice_id) -> pd.DataFrame:
+    """بنود فاتورة شراء جاهزة للإرجاع: الصنف والوحدة والسعر من الفاتورة، والمتبقي القابل للإرجاع بعد المرتجعات النشطة السابقة،
+    والدفعة (الصلاحية) التي أنشأها السطر ليُخصم المرتجع منها أولًا.
+
+    المرتجعات السابقة تُحسب لكل صنف (بوحدة الاستهلاك) كما يتحقق منها documents.create_return، وتوزَّع على أسطر الصنف بالترتيب.
+    """
+    df = query("""SELECT l.id AS line_id, l.item_id, i.name, COALESCE(l.unit_name, i.unit) AS unit, i.unit AS base_unit,
+                         COALESCE(l.unit_factor, 1) AS factor, l.qty, l.unit_price, l.expiry_date,
+                         (SELECT s.id FROM stock_lots s WHERE s.source_type='purchase_line' AND s.source_id=l.id ORDER BY s.id LIMIT 1) AS lot_id
+                  FROM purchase_lines l JOIN items i ON i.id=l.item_id JOIN purchase_invoices p ON p.id=l.invoice_id
+                  WHERE l.invoice_id=? AND p.client_id=? ORDER BY l.id""", (int(invoice_id), cid))
+    if df.empty:
+        return df
+    done = dict(query("""SELECT l.item_id, SUM(l.base_qty) AS q FROM purchase_return_lines l JOIN purchase_returns r ON r.id=l.return_id
+                         WHERE r.invoice_id=? AND r.status='active' GROUP BY l.item_id""", (int(invoice_id),)).values)
+    left = []
+    for _, r in df.iterrows():
+        base = float(r["qty"]) * float(r["factor"])
+        used = min(base, float(done.get(r["item_id"], 0) or 0))
+        done[r["item_id"]] = float(done.get(r["item_id"], 0) or 0) - used
+        left.append(round((base - used) / float(r["factor"]), 6))
+    df["returnable"] = left
+    return df
 
 
 def return_lines(return_id) -> pd.DataFrame:

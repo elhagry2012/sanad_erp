@@ -83,14 +83,14 @@ def render():
                     except ValueError as e:
                         st.error(str(e))
         st.subheader("سجل التشغيلات")
-        st.dataframe(query("""SELECT b.batch_date AS "التاريخ", r.name AS "المنتج", b.output_qty AS "الكمية", b.total_cost AS "التكلفة",
+        st.dataframe(query("""SELECT COALESCE(b.doc_no,'') AS "رقم التشغيلة", b.batch_date AS "التاريخ", r.name AS "المنتج", b.output_qty AS "الكمية", b.total_cost AS "التكلفة",
                               b.total_cost/b.output_qty AS "تكلفة الوحدة", b.created_by AS "المستخدم" FROM production_batches b
                               JOIN recipes r ON r.id=b.recipe_id WHERE b.client_id=? ORDER BY b.batch_date DESC, b.id DESC""", (cid,)).round(4),
                      use_container_width=True, hide_index=True)
-        bl = query("""SELECT b.id, b.batch_date, r.name, COALESCE(b.is_voided,0) AS v FROM production_batches b
+        bl = query("""SELECT b.id, b.doc_no, b.batch_date, r.name, COALESCE(b.is_voided,0) AS v FROM production_batches b
                       JOIN recipes r ON r.id=b.recipe_id WHERE b.client_id=? ORDER BY b.id DESC LIMIT 50""", (cid,))
         if not bl.empty:
-            bmap = {f"#{r['id']} — {r['batch_date']} — {r['name']}" + (" (معكوسة)" if r["v"] else ""): (int(r["id"]), bool(r["v"])) for _, r in bl.iterrows()}
+            bmap = {f"{r['doc_no'] or '#' + str(r['id'])} — {r['batch_date']} — {r['name']}" + (" (معكوسة)" if r["v"] else ""): (int(r["id"]), bool(r["v"])) for _, r in bl.iterrows()}
             bsel = st.selectbox("تشغيلة للإلغاء أو طلب التعديل", list(bmap), key="batch_pick")
             bid, bvoid = bmap[bsel]
             if not bvoid:

@@ -45,7 +45,7 @@ def render():
         a, b = st.columns(2)
         f = a.date_input("من", date.today() - timedelta(days=60), key="e_f")
         t = b.date_input("إلى", date.today(), key="e_t")
-        df = query("""SELECT e.id, e.exp_date, c.name AS category, e.amount, e.note,
+        df = query("""SELECT e.id, COALESCE(e.doc_no,'') AS doc_no, e.exp_date, c.name AS category, e.amount, e.note,
                       COALESCE(e.pay_method,'cash') AS pay_method, e.created_by
                       FROM expenses e JOIN expense_categories c ON c.id=e.category_id
                       WHERE e.client_id=? AND e.exp_date BETWEEN ? AND ? ORDER BY e.exp_date DESC, e.id DESC""", (cid, str(f), str(t)))
@@ -54,22 +54,23 @@ def render():
         else:
             st.metric("إجمالي المصروفات", f"{df['amount'].sum():,.0f}")
             df["الدفع"] = df["pay_method"].map(treasury.METHOD_AR)
-            _det = df.drop(columns=["pay_method"]).rename(columns={"id": "رقم", "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ", "note": "ملاحظة", "created_by": "سجّله"})
+            _det = df.drop(columns=["pay_method"]).drop(columns="id").rename(columns={"doc_no": "رقم المستند", "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ", "note": "ملاحظة", "created_by": "سجّله"})
             _sum = df.groupby("category", as_index=False)["amount"].sum().rename(columns={"category": "البند", "amount": "المبلغ"})
             export_buttons(sections=[Section("سجل المصروفات", _det, {"المبلغ": FMT_MONEY}, ["المبلغ"]), Section("الملخص حسب البند", _sum, {"المبلغ": FMT_MONEY}, ["المبلغ"])],
                            title="سجل المصروفات", filename="expenses", subtitle=f"{auth.client_name()} — من {f} إلى {t}", key="exp_exp")
             ed = st.data_editor(df.drop(columns="pay_method"), hide_index=True, use_container_width=True, key="ed_exp",
-                                disabled=["id", "category", "created_by", "الدفع"],
-                                column_config={"id": None, "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ",
+                                disabled=["id", "doc_no", "category", "created_by", "الدفع"],
+                                column_config={"id": None, "doc_no": "رقم المستند", "exp_date": "التاريخ", "category": "البند", "amount": "المبلغ",
                                                "note": "ملاحظة", "created_by": "سجّله"})
             if st.button("حفظ تعديلات المصروفات"):
                 try:
-                    n = services.apply_edits("expenses", df.drop(columns=["pay_method", "الدفع"]), ed.drop(columns=["الدفع"]), user, cid)
+                    n = services.apply_edits("expenses", df.drop(columns=["pay_method", "الدفع", "doc_no"]), ed.drop(columns=["الدفع", "doc_no"]), user, cid)
                     st.success(f"تم حفظ {n} تعديل.") if n else st.info("لا توجد تعديلات.")
                 except ValueError as e:
                     st.error(str(e))
             c1, c2 = st.columns([2, 1])
-            eid = c1.selectbox("حذف مصروف (رقم السجل)", df["id"])
+            enos = dict(zip(df["id"], df["doc_no"]))
+            eid = c1.selectbox("حذف مصروف", df["id"], format_func=lambda i: enos.get(i) or f"#{i}")
             if c2.button("حذف"):
                 try:
                     services.delete_expense(int(eid), user, cid)

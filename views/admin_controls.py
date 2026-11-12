@@ -3,20 +3,20 @@ from datetime import date
 import streamlit as st
 
 from database.db import query
-from utils import theme, auth, controls
+from utils import theme, auth, controls, sequences
 
 
 def render():
     auth.require_admin()
     me = auth.username()
-    theme.header("الضوابط المالية", "إقفال الفترات • تنبيهات الحركات الكبيرة • إعدادات الضريبة (المدير العام فقط)")
+    theme.header("الضوابط المالية", "إقفال الفترات • تنبيهات الحركات الكبيرة • إعدادات الضريبة • ترقيم المستندات (المدير العام فقط)")
     clients = query("SELECT id, name FROM clients ORDER BY name")
     if clients.empty:
         st.info("لا توجد مطاعم.")
         return
     cname = st.selectbox("المطعم", clients["name"], key="ctl_client")
     cid = int(clients.loc[clients["name"] == cname, "id"].iloc[0])
-    t1, t2, t3 = st.tabs(["🔒 إقفال الفترات", "🚨 تنبيهات الحركات الكبيرة", "🧾 إعدادات الضريبة"])
+    t1, t2, t3, t4 = st.tabs(["🔒 إقفال الفترات", "🚨 تنبيهات الحركات الكبيرة", "🧾 إعدادات الضريبة", "🔢 ترقيم المستندات"])
 
     with t1:
         st.info("الفترة المقفلة تمنع إضافة أو تعديل أو إلغاء أي مستند بتاريخ داخلها (مشتريات، مبيعات، مصروفات، هدر، تحويلات، قيود خزينة، جرد، مرتجعات)، "
@@ -67,3 +67,36 @@ def render():
             controls.set_setting(cid, "vat_rate", nr, me)
             controls.set_setting(cid, "sales_prices_include_vat", "1" if ni else "0", me)
             st.success("تم الحفظ. تعتمد عليها التقارير الضريبية.")
+
+    with t4:
+        _sequences_tab(cid, me)
+
+
+def _sequences_tab(cid, me):
+    st.info("لكل نوع مستند تسلسل مستقل لهذا المطعم. الرقم يُحجز داخل نفس معاملة الحفظ فلا يتكرر حتى مع إدخال عدة مستخدمين في نفس اللحظة، "
+            "ويُحسب من تاريخ المستند (سنويًا: PI-2026-00001، شهريًا: PI-202611-00001، أو تسلسل مستمر: PI-00001). "
+            "تغيير الإعداد يؤثر على المستندات الجديدة فقط؛ المستندات السابقة تحتفظ بأرقامها.")
+    df = sequences.settings_df(cid)
+    st.dataframe(df.drop(columns="doc_type").assign(**{"إعادة البدء": df["إعادة البدء"].map(sequences.RESET_AR)}),
+                 use_container_width=True, hide_index=True)
+    st.markdown("**تعديل تسلسل**")
+    t = st.selectbox("نوع المستند", list(df["doc_type"]), format_func=lambda k: sequences.DOC_SEQ[k][0], key="seq_t")
+    row = df[df["doc_type"] == t].iloc[0]
+    a, b, c = st.columns(3)
+    prefix = a.text_input("البادئة", value=row["البادئة"], key=f"seq_p_{t}", help="حتى 12 حرفًا بدون مسافات، ويمكن تركها فارغة")
+    padding = b.number_input("عدد الأرقام", 1, 10, int(row["عدد الأرقام"]), key=f"seq_w_{t}")
+    resets = list(sequences.RESET_AR)
+    reset = c.selectbox("إعادة البدء", resets, index=resets.index(row["إعادة البدء"]), format_func=sequences.RESET_AR.get, key=f"seq_r_{t}")
+    change_start = st.checkbox("تحديد رقم بداية للمستند التالي في الفترة الحالية (مثلًا لاستكمال ترقيم دفتر ورقي)", key=f"seq_s_{t}")
+    start = st.number_input("رقم المستند التالي", min_value=1, step=1, value=int(row["آخر رقم في الفترة الحالية"]) + 1,
+                            key=f"seq_n_{t}") if change_start else None
+    sample = sequences._render(prefix.strip(), reset, sequences._period(reset, date.today()),
+                               int(start or row["آخر رقم في الفترة الحالية"] + 1), int(padding))
+    st.caption(f"شكل الرقم التالي: **{sample}**")
+    if st.button("حفظ إعداد الترقيم", type="primary", key="seq_save"):
+        try:
+            sequences.save_settings(cid, t, prefix, padding, reset, me, start_at=start)
+            st.success("تم الحفظ.")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))

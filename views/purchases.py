@@ -4,7 +4,7 @@ import streamlit as st
 
 from database.db import query
 from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
-from utils import theme, auth, services, reports, treasury, inventory, documents, controls
+from utils import theme, auth, services, reports, treasury, inventory, documents, controls, sequences
 
 BASE_UNITS = ["كجم", "جرام", "لتر", "مل", "قطعة", "علبة", "كيس", "كرتونة"]
 NEW_ITEM = "➕ صنف جديد…"
@@ -21,7 +21,7 @@ def show_invoice(cid, inv_id):
         st.warning("الفاتورة غير موجودة.")
         return
     with st.container(border=True):
-        st.markdown(f"### فاتورة شراء رقم {hdr['id']} — {hdr['supplier']}")
+        st.markdown(f"### فاتورة شراء {sequences.label(hdr.get('doc_no'), hdr['id'])} — {hdr['supplier']}")
         if hdr.get("status") == "voided":
             st.error(f"🚫 فاتورة ملغاة بواسطة {hdr.get('voided_by')} في {hdr.get('voided_at')} — السبب: {hdr.get('void_reason') or '—'}. أثرها المخزني والمالي معكوس.")
         elif isinstance(hdr.get("replaces_id"), (int, float)) and hdr.get("replaces_id") == hdr.get("replaces_id"):
@@ -45,6 +45,18 @@ def show_invoice(cid, inv_id):
         n[0].metric("صافي المستحق للمورد", f"{hdr['net_due']:,.2f}")
         n[1].metric("المدفوع", f"{_num(hdr['paid']):,.2f}")
         n[2].metric("المتبقي", f"{hdr['remaining']:,.2f}")
+        if hdr["remaining"] < -0.005:
+            st.warning(f"المدفوع أكبر من صافي المستحق بعد التعديل: الفرق {-hdr['remaining']:,.2f} أصبح رصيدًا لصالحنا لدى المورد (يظهر في كشف حسابه).")
+        heads, alines = documents.adjustments_of(hdr["id"])
+        if not heads.empty:
+            with st.expander(f"🧾 سجل التعديلات المباشرة على هذه الفاتورة ({len(heads)})"):
+                for _, h in heads.iterrows():
+                    st.markdown(f"**{h['رقم التعديل'] or '#' + str(h['id'])}** — {h['التاريخ']} — طلبه {h['طلبه']} واعتمده {h['اعتمده']} — "
+                                f"الإجمالي {h['الإجمالي قبل']:,.2f} ← {h['الإجمالي بعد']:,.2f} (الفرق {h['الفرق']:+,.2f})")
+                    if h["السبب"]:
+                        st.caption(h["السبب"])
+                    st.dataframe(alines[alines["adjustment_id"] == h["id"]].drop(columns="adjustment_id").round(3),
+                                 use_container_width=True, hide_index=True)
         img = reports.invoice_image_path(hdr.get("image_path"))
         if img:
             st.image(str(img), caption="صورة الفاتورة الورقية", use_container_width=True)
@@ -72,7 +84,7 @@ def _prefill_from_invoice(cid, inv_id):
         ss[K("sel", i)], ss[K("u", i, r["name"])] = r["name"], r["unit"]
         ss[K("q", i)], ss[K("p", i)] = float(r["qty"]), float(r["unit_price"])
         if isinstance(r["expiry_date"], str):
-            ss[K("exp", i)] = date.fromisoformat(r["expiry_date"])
+            ss[K("exp", i, r["name"])] = date.fromisoformat(r["expiry_date"])
     vr, wr = _num(hdr.get("vat_rate")), _num(hdr.get("wht_rate"))
     ss[K("vat")], ss[K("wht")] = vr > 0, wr > 0
     ss[K("vatr")], ss[K("whtr")] = (vr if vr > 0 else 14.0), (wr if wr > 0 else 1.0)
@@ -82,12 +94,86 @@ def _prefill_from_invoice(cid, inv_id):
         ss[K("paid")] = float(_num(hdr["paid"]))
 
 
+def adjust_preview(pv):
+    """عرض فروق التعديل المباشر وأثره (يُستخدم هنا وفي شاشة قرارات المدير العام)."""
+    diff = pd.DataFrame([{"الصنف": p["name"], "الوحدة": p["unit"], "الكمية قبل": p["qty"], "الكمية بعد": p["new_qty"],
+                          "السعر قبل": p["price"], "السعر بعد": p["new_price"],
+                          "فرق المخزون": f"{p['base_delta']:+g} {p['base_unit']}", "فرق القيمة": round(p["value_delta"], 2)}
+                         for p in pv["plan"]])
+    st.dataframe(diff, use_container_width=True, hide_index=True)
+    b, a = pv["before"], pv["after"]
+    m = st.columns(3)
+    m[0].metric("قبل الضريبة", f"{a['subtotal']:,.2f}", f"{a['subtotal'] - b['subtotal']:+,.2f}", delta_color="off")
+    m[1].metric("إجمالي الفاتورة", f"{a['total']:,.2f}", f"{a['total'] - b['total']:+,.2f}", delta_color="off")
+    m[2].metric("صافي المستحق للمورد", f"{a['net_due']:,.2f}", f"{a['net_due'] - b['net_due']:+,.2f}", delta_color="off")
+    if pv["hdr"]["paid"] > a["net_due"] + 0.005:
+        st.warning(f"المدفوع ({pv['hdr']['paid']:,.2f}) أكبر من صافي المستحق الجديد: الفرق {pv['hdr']['paid'] - a['net_due']:,.2f} "
+                   "يصبح رصيدًا لصالحنا لدى المورد (بدون حركة نقدية).")
+    for s_ in pv["shortages"]:
+        st.warning(f"نقص بالمخزن عند التخفيض: {s_}")
+
+
+def _adjust_editor(cid, inv_id, key):
+    """جدول أسطر الفاتورة بقيمها الحالية؛ المستخدم يكتب الكمية/السعر الصحيح. يرجع (التغييرات، المعاينة أو None)."""
+    src = query("""SELECT l.id, i.name, COALESCE(l.unit_name, i.unit) AS unit, l.qty, l.unit_price FROM purchase_lines l
+                   JOIN items i ON i.id=l.item_id WHERE l.invoice_id=? ORDER BY l.id""", (int(inv_id),))
+    if src.empty:
+        st.info("الفاتورة بلا بنود.")
+        return [], None
+    NQ, NP = "الكمية الصحيحة", "السعر الصحيح"
+    grid = pd.DataFrame({"الصنف": src["name"], "الوحدة": src["unit"], "الكمية الحالية": src["qty"].astype(float),
+                         "السعر الحالي": src["unit_price"].astype(float), NQ: src["qty"].astype(float), NP: src["unit_price"].astype(float)})
+    ed = st.data_editor(grid, num_rows="fixed", hide_index=True, use_container_width=True, key=f"adj_ed_{key}_{inv_id}",
+                        disabled=[c for c in grid.columns if c not in (NQ, NP)],
+                        column_config={NQ: st.column_config.NumberColumn(min_value=0.0, format="%.3f", help="بنفس وحدة السطر"),
+                                       NP: st.column_config.NumberColumn(min_value=0.0, format="%.2f", help="سعر الوحدة قبل الضريبة"),
+                                       "الكمية الحالية": st.column_config.NumberColumn(format="%.3f"),
+                                       "السعر الحالي": st.column_config.NumberColumn(format="%.2f")})
+    changes = []
+    for i, r in ed.iterrows():
+        s = src.iloc[i]
+        q = float(s["qty"]) if pd.isna(r[NQ]) else float(r[NQ])
+        p = float(s["unit_price"]) if pd.isna(r[NP]) else float(r[NP])
+        if abs(q - float(s["qty"])) > 1e-9 or abs(p - float(s["unit_price"])) > 1e-9:
+            changes.append({"line_id": int(s["id"]), "qty": q, "price": p, "old_qty": float(s["qty"]), "old_price": float(s["unit_price"])})
+    if not changes:
+        st.caption("عدّل «الكمية الصحيحة» أو «السعر الصحيح» في السطر المطلوب لتظهر المعاينة.")
+        return [], None
+    try:
+        pv = documents.preview_adjustment(cid, int(inv_id), changes)
+    except ValueError as e:
+        st.error(str(e))
+        return changes, None
+    adjust_preview(pv)
+    return changes, pv
+
+
+ADJUST_HELP = ("التعديل المباشر يصحح الكمية/السعر في الفاتورة نفسها بدل عمل مرتجع: فرق الكمية يدخل أو يخرج من مخزن الاستلام، "
+               "ويُصحَّح المتوسط المرجح وآخر سعر، وتُعاد حسابات الضريبة والإجمالي فيتعدل حساب المورد تلقائيًا. "
+               "يُحفظ كل تعديل برقم مستقل مع القيم قبل وبعد.")
+
+
 def _invoice_tools(cid, user, inv_id, voided):
-    """المدير العام: إلغاء/تعديل. غيره: طلب تعديل يصل المدير العام فورًا."""
+    """المدير العام: تعديل مباشر/إلغاء/استبدال. غيره: طلب تعديل مباشر للكميات والأسعار، أو طلب عام، يصلان المدير العام فورًا."""
     if voided:
         return
+    if st.session_state.get(f"adj_done_{inv_id}"):
+        st.success(st.session_state.pop(f"adj_done_{inv_id}"))
     if auth.is_admin():
-        with st.expander("🛠 أدوات المدير العام: إلغاء أو تعديل هذه الفاتورة"):
+        with st.expander("✏️ تعديل مباشر للكميات أو الأسعار (بدون إلغاء الفاتورة أو مرتجع)"):
+            st.caption(ADJUST_HELP)
+            changes, pv = _adjust_editor(cid, inv_id, "adm")
+            if pv:
+                reason = st.text_input("سبب التعديل (إلزامي)", key=f"adj_r_{inv_id}")
+                neg = st.checkbox("السماح بالرصيد السالب إن كانت الكمية المخفّضة قد استُهلكت", key=f"adj_n_{inv_id}")
+                if st.button("💾 تطبيق التعديل على الفاتورة", type="primary", key=f"adj_b_{inv_id}"):
+                    try:
+                        _, no, b, a = documents.adjust_purchase(cid, int(inv_id), changes, reason, user, neg)
+                        st.session_state[f"adj_done_{inv_id}"] = f"تم تطبيق التعديل {no}: الإجمالي {b['total']:,.2f} ← {a['total']:,.2f}."
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+        with st.expander("🛠 أدوات المدير العام: إلغاء أو استبدال هذه الفاتورة بالكامل"):
             reason = st.text_input("السبب (إلزامي للإلغاء)", key=f"vr_{inv_id}")
             neg = st.checkbox("السماح بالرصيد السالب إن كان جزء من الكمية قد استُهلك", key=f"vn_{inv_id}")
             c1, c2 = st.columns(2)
@@ -98,13 +184,26 @@ def _invoice_tools(cid, user, inv_id, voided):
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
-            if c2.button("✏️ تعديل الفاتورة (إلغاء الأصل وإنشاء بديل)", key=f"eb_{inv_id}"):
+            if c2.button("♻️ استبدال الفاتورة (إلغاء الأصل وإنشاء بديل)", key=f"eb_{inv_id}"):
                 _prefill_from_invoice(cid, inv_id)
                 st.session_state.pop("last_invoice", None)
                 st.rerun()
             st.caption("الإلغاء يعكس المخزون والدفعات والمتوسط المرجح وسجل الأسعار والخزينة وحساب المورد، ويُبقي الفاتورة ظاهرة كملغاة مع حركة عكس بسجل الصنف.")
     else:
-        with st.expander("✉️ طلب تعديل هذه الفاتورة (يصل المدير العام فورًا)"):
+        with st.expander("✏️ طلب تعديل مباشر للكميات أو الأسعار (بديل المرتجع — يُطبَّق تلقائيًا عند اعتماد المدير العام)"):
+            st.caption(ADJUST_HELP)
+            changes, pv = _adjust_editor(cid, inv_id, "req")
+            if pv:
+                reason = st.text_area("سبب التعديل (إلزامي)", key=f"arq_{inv_id}",
+                                      placeholder="مثال: الكمية المستلمة فعليًا 8 كراتين وليست 10 / خطأ في كتابة السعر")
+                if st.button("📨 إرسال طلب التعديل للمدير العام", type="primary", key=f"arqb_{inv_id}"):
+                    try:
+                        controls.create_adjust_request(cid, int(inv_id), changes, reason, user)
+                        st.session_state[f"adj_done_{inv_id}"] = "تم إرسال طلب التعديل المباشر وإشعار المدير العام. تابع حالته من «الإشعارات وطلبات التعديل»."
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+        with st.expander("✉️ طلب عام: إلغاء أو تعديل آخر لهذه الفاتورة (يصل المدير العام فورًا)"):
             reason = st.text_area("لماذا تحتاج التعديل؟", key=f"rq_{inv_id}")
             proposed = st.text_input("التعديل المطلوب (اختياري)", key=f"rqp_{inv_id}")
             if st.button("إرسال الطلب", key=f"rqb_{inv_id}"):
@@ -118,7 +217,8 @@ def _invoice_tools(cid, user, inv_id, voided):
 def _invoice_form(cid, user):
     last = st.session_state.get("last_invoice")
     if last:
-        st.success(f"تم حفظ الفاتورة رقم {last} وتحديث المخزن والأسعار والخزينة/البنك.")
+        no = query("SELECT doc_no FROM purchase_invoices WHERE id=?", (int(last),))
+        st.success(f"تم حفظ الفاتورة {sequences.label(no['doc_no'].iloc[0] if not no.empty else None, last)} وتحديث المخزن والأسعار والخزينة/البنك.")
         show_invoice(cid, last)
         _invoice_tools(cid, user, int(last), voided=False)
         if st.button("إخفاء وإدخال فاتورة جديدة"):
@@ -128,7 +228,7 @@ def _invoice_form(cid, user):
 
     rep_id = st.session_state.get("pi_replace")
     if rep_id:
-        st.warning(f"⚠️ وضع تعديل الفاتورة رقم {rep_id}: عند الحفظ تُلغى الفاتورة الأصلية ويُعكس أثرها وتُنشأ فاتورة بديلة في معاملة واحدة (فإن فشل الحفظ لا يتغير شيء).")
+        st.warning(f"⚠️ وضع استبدال الفاتورة (الرقم الداخلي {rep_id}): عند الحفظ تُلغى الفاتورة الأصلية ويُعكس أثرها وتُنشأ فاتورة بديلة في معاملة واحدة (فإن فشل الحفظ لا يتغير شيء).")
         if st.button("إلغاء وضع التعديل والعودة لإدخال جديد"):
             for k in [k for k in list(st.session_state.keys()) if k.startswith("pi_")]:
                 st.session_state.pop(k)
@@ -166,6 +266,10 @@ def _invoice_form(cid, user):
     wname = d.selectbox("مخزن الاستلام", list(whs["name"]), key=K("wh"), **ws(K("wh"), index=main_idx))
 
     st.markdown("**بنود الفاتورة** (الكمية والسعر بوحدة الشراء المختارة، وتُحوَّل تلقائيًا لوحدة الاستهلاك)")
+    tracked = int(items["track_expiry"].fillna(0).astype(int).sum()) if not items.empty else 0
+    st.caption("تاريخ الصلاحية: إلزامي للأصناف التي تتتبع الصلاحية (له تاريخ افتراضي حسب مدة الصلاحية)، واختياري لبقية الأصناف. "
+               "كل سطر له تاريخ يُنشئ دفعة تظهر في تقرير الصلاحية وتُصرف بنظام الأقرب انتهاءً." +
+               ("" if tracked else " ⚠️ لا يوجد حاليًا أي صنف مفعّل له «يتتبع الصلاحية» — فعّله من تبويب الخامات للأصناف التي تحتاجه."))
     w = [2.3, 1.2, 1.0, 1.2, 1.2, 1.4, 0.5]
     for col, t in zip(st.columns(w), ["الصنف", "الوحدة", "الكمية", "سعر الوحدة", "الإجمالي", "تاريخ الصلاحية", ""]):
         col.markdown(f"<small><b>{t}</b></small>", unsafe_allow_html=True)
@@ -190,9 +294,16 @@ def _invoice_form(cid, user):
         price = cc[3].number_input("السعر", min_value=0.0, step=1.0, format="%.2f", key=K("p", rid), label_visibility="collapsed")
         cc[4].markdown(f"<div style='padding-top:.5rem'><b>{qty * price:,.2f}</b></div>", unsafe_allow_html=True)
         expiry = None
-        if r is not None and int(r["track_expiry"] or 0):
-            default_exp = date.today() + timedelta(days=int(r["shelf_life_days"] or 30))
-            expiry = cc[5].date_input("الصلاحية", key=K("exp", rid), label_visibility="collapsed", **ws(K("exp", rid), value=default_exp))
+        if r is not None:
+            ek = K("exp", rid, sel)                          # المفتاح يتبع الصنف فلا ينتقل تاريخ صنف لآخر عند تغيير السطر
+            if int(r["track_expiry"] or 0):
+                default_exp = date.today() + timedelta(days=int(r["shelf_life_days"] or 30))
+                expiry = cc[5].date_input("الصلاحية", key=ek, label_visibility="collapsed",
+                                          help="إلزامي: صنف يتتبع الصلاحية", **ws(ek, value=default_exp))
+            else:
+                expiry = cc[5].date_input("الصلاحية", key=ek, label_visibility="collapsed",
+                                          help="اختياري لهذا الصنف. لجعله إلزاميًا فعّل «يتتبع الصلاحية» من تبويب الخامات.",
+                                          **ws(ek, value=None))
         else:
             cc[5].markdown("<div style='padding-top:.5rem;color:#888'>—</div>", unsafe_allow_html=True)
         if cc[6].button("✖", key=K("x", rid), help="حذف السطر"):
@@ -274,6 +385,70 @@ def _invoice_form(cid, user):
             st.error(str(e))
 
 
+# ======================================================== مرتجع المشتريات
+def _return_lines_from_invoice(cid, inv_id, rn):
+    """بنود الفاتورة محمّلة تلقائيًا (الصنف، الوحدة، السعر، المتاح للإرجاع، الصلاحية)؛ المستخدم يحدد كمية المرتجع فقط.
+
+    يرجع (lines, problems) بصيغة documents.create_return، مع ربط كل سطر بدفعة الفاتورة (lot_id).
+    """
+    src = reports.invoice_return_lines(cid, inv_id)
+    if src.empty:
+        st.info("هذه الفاتورة بلا بنود.")
+        return [], []
+    if src["returnable"].sum() <= 1e-9:
+        st.info("تم إرجاع كامل كميات هذه الفاتورة سابقًا.")
+        return [], []
+    full = st.toggle("إرجاع كامل الكميات المتبقية من الفاتورة", key=f"ret_all_{inv_id}_{rn}")
+    QTY, PRICE, LEFT = "كمية المرتجع", "سعر الوحدة", "المتاح للإرجاع"
+    grid = pd.DataFrame({
+        "الصنف": src["name"], "الوحدة": src["unit"], "المشتراة": src["qty"].astype(float), LEFT: src["returnable"],
+        PRICE: src["unit_price"].astype(float), "الصلاحية": src["expiry_date"].fillna("—"),
+        QTY: src["returnable"] if full else 0.0})
+    ed = st.data_editor(
+        grid, num_rows="fixed", hide_index=True, use_container_width=True, key=f"ret_lines_{inv_id}_{int(full)}_{rn}",
+        disabled=[col for col in grid.columns if col not in (QTY, PRICE)],
+        column_config={"المشتراة": st.column_config.NumberColumn(format="%.3f"),
+                       LEFT: st.column_config.NumberColumn(format="%.3f", help="المشتراة ناقص المرتجعات النشطة السابقة"),
+                       PRICE: st.column_config.NumberColumn(min_value=0.0, format="%.2f", help="من الفاتورة، ويمكن تعديله"),
+                       QTY: st.column_config.NumberColumn(min_value=0.0, format="%.3f")})
+    lines, problems = [], []
+    for i, r in ed.iterrows():
+        q = float(r[QTY] or 0)
+        if q <= 0:
+            continue
+        s = src.iloc[i]
+        if q > float(s["returnable"]) + 1e-6:
+            problems.append(f"كمية مرتجع «{s['name']}» ({q:g}) أكبر من المتاح للإرجاع ({float(s['returnable']):g} {s['unit']}).")
+        price = r[PRICE]
+        lines.append({"item_id": int(s["item_id"]), "unit": s["unit"], "qty": q,
+                      "price": float(s["unit_price"]) if pd.isna(price) else float(price),
+                      "lot_id": None if pd.isna(s["lot_id"]) else int(s["lot_id"])})
+    return lines, problems
+
+
+def _return_lines_manual(cid, rn):
+    """مرتجع غير مرتبط بفاتورة: اختيار الصنف والوحدة والكمية والسعر يدويًا."""
+    names = list(query("SELECT name FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))["name"])
+    unit_opts = sorted(set(query("SELECT unit FROM items WHERE client_id=?", (cid,))["unit"]) |
+                       set(query("SELECT u.unit_name FROM item_units u JOIN items i ON i.id=u.item_id WHERE i.client_id=?", (cid,))["unit_name"]))
+    grid = pd.DataFrame({"الصنف": [None] * 3, "الوحدة": [None] * 3, "الكمية": [0.0] * 3, "السعر": [None] * 3})
+    ed = st.data_editor(grid, num_rows="dynamic", use_container_width=True, key=f"ret_grid_manual_{rn}", column_config={
+        "الصنف": st.column_config.SelectboxColumn(options=names, required=True),
+        "الوحدة": st.column_config.SelectboxColumn(options=unit_opts, help="فارغة = وحدة الاستهلاك"),
+        "الكمية": st.column_config.NumberColumn(min_value=0.0, format="%.3f"),
+        "السعر": st.column_config.NumberColumn(min_value=0.0, format="%.2f", help="إلزامي بدون فاتورة")})
+    ids = dict(query("SELECT name, id FROM items WHERE client_id=?", (cid,)).values)
+    lines, problems = [], []
+    for _, r in ed.iterrows():
+        if r["الصنف"] in ids and r["الكمية"] and r["الكمية"] > 0:
+            pr = r["السعر"]
+            if pd.isna(pr):
+                problems.append(f"أدخل سعر الوحدة للصنف «{r['الصنف']}».")
+            lines.append({"item_id": int(ids[r["الصنف"]]), "unit": r["الوحدة"] if isinstance(r["الوحدة"], str) else None,
+                          "qty": float(r["الكمية"]), "price": None if pd.isna(pr) else float(pr)})
+    return lines, problems
+
+
 # ======================================================== الصفحة
 def _returns_tab(cid, user):
     sup = query("SELECT id, name FROM suppliers WHERE client_id=? ORDER BY name", (cid,))
@@ -283,60 +458,80 @@ def _returns_tab(cid, user):
         return
     last = st.session_state.get("last_return")
     if last:
-        st.success(f"تم حفظ المرتجع رقم {last}: خرجت الكميات من المخزن، وصُحِّح متوسط التكلفة، وخُفِّض حساب المورد.")
+        rno = query("SELECT doc_no FROM purchase_returns WHERE id=?", (int(last),))
+        st.success(f"تم حفظ المرتجع {sequences.label(rno['doc_no'].iloc[0] if not rno.empty else None, last)}: خرجت الكميات من المخزن، وصُحِّح متوسط التكلفة، وخُفِّض حساب المورد.")
         st.dataframe(reports.return_lines(int(last)).round(3), use_container_width=True, hide_index=True)
         if st.button("إخفاء", key="hide_ret"):
             st.session_state.pop("last_return")
             st.rerun()
         st.divider()
+    rn = st.session_state.setdefault("ret_nonce", 0)          # يتغير بعد كل حفظ فيبدأ النموذج نظيفًا
     st.markdown("**مرتجع جديد للمورد** (للمشتريات التالفة أو المنتهية الصلاحية أو المخالفة)")
+    st.caption("لتصحيح خطأ إدخال في كمية أو سعر فاتورة (وليس إرجاع بضاعة فعليًا للمورد) استخدم «التعديل المباشر» من تبويب «الفواتير».")
     a, b, c = st.columns(3)
     sname = a.selectbox("المورد", sup["name"], key="ret_sup")
     sid = int(sup.loc[sup["name"] == sname, "id"].iloc[0])
-    invs = query("""SELECT id, invoice_no, invoice_date, total FROM purchase_invoices WHERE client_id=? AND supplier_id=?
+    invs = query("""SELECT id, doc_no, invoice_no, invoice_date, total FROM purchase_invoices WHERE client_id=? AND supplier_id=?
                     AND COALESCE(status,'active')='active' ORDER BY id DESC""", (cid, sid))
     opts = {"بدون ربط بفاتورة": None}
     for _, r in invs.iterrows():
-        opts[f"#{r['id']} — {r['invoice_date']} — {r['invoice_no'] or ''} ({r['total']:,.0f})"] = int(r["id"])
-    pick = b.selectbox("الفاتورة الأصلية (تحدّد الأسعار والحد الأقصى للإرجاع)", list(opts), key="ret_inv")
+        opts[f"{sequences.label(r['doc_no'], r['id'])} — {r['invoice_date']} — {r['invoice_no'] or ''} ({r['total']:,.0f})"] = int(r["id"])
+    pick = b.selectbox("الفاتورة الأصلية (تُحمَّل بنودها وأسعارها تلقائيًا)", list(opts), key=f"ret_inv_{sid}")
     inv_id = opts[pick]
-    day = c.date_input("تاريخ المرتجع", date.today(), key="ret_date")
+    hdr = reports.get_invoice(cid, inv_id)[0] if inv_id else None
+    inv_day = date.fromisoformat(hdr["invoice_date"]) if hdr else None
+    day = c.date_input("تاريخ المرتجع", max(date.today(), inv_day) if inv_day else date.today(), min_value=inv_day,
+                       key=f"ret_date_{inv_id}")
+    vr = _num(hdr.get("vat_rate")) if hdr else 0.0
+    wr = _num(hdr.get("wht_rate")) if hdr else 0.0
+    if hdr:
+        with st.container(border=True):
+            h = st.columns(5)
+            h[0].write(f"**تاريخ الفاتورة:** {hdr['invoice_date']}")
+            h[1].write(f"**رقم فاتورة المورد:** {hdr['invoice_no'] or '—'}")
+            h[2].write(f"**مخزن الاستلام:** {hdr.get('warehouse') or '—'}")
+            h[3].write(f"**الضريبة:** {vr:g}%  |  **الخصم:** {wr:g}%")
+            h[4].write(f"**إجمالي الفاتورة:** {_num(hdr['total']):,.2f}")
     d, e, f = st.columns(3)
     reason = d.selectbox("السبب", documents.RETURN_REASONS, key="ret_reason")
-    main_idx = int(whs.index[whs["kind"] == "main"][0]) if (whs["kind"] == "main").any() else 0
-    wname = e.selectbox("يُخصم من مخزن", list(whs["name"]), index=main_idx, key="ret_wh")
+    wh_ids = list(whs["id"])
+    if hdr and hdr.get("warehouse_id") in wh_ids:
+        wh_idx = wh_ids.index(hdr["warehouse_id"])           # افتراضيًا: المخزن الذي استُلمت فيه الفاتورة
+    else:
+        wh_idx = int(whs.index[whs["kind"] == "main"][0]) if (whs["kind"] == "main").any() else 0
+    wname = e.selectbox("يُخصم من مخزن", list(whs["name"]), index=wh_idx, key=f"ret_wh_{inv_id}")
     method = f.radio("الاسترداد", ["none", "cash", "bank"], horizontal=True, key="ret_method",
                      format_func={"none": "خصم من حساب المورد", "cash": "استرداد نقدي", "bank": "استرداد بنكي"}.get)
-    if inv_id:
-        names = list(query("SELECT DISTINCT i.name FROM purchase_lines l JOIN items i ON i.id=l.item_id WHERE l.invoice_id=? ORDER BY i.name", (inv_id,))["name"])
-    else:
-        names = list(query("SELECT name FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))["name"])
-    unit_opts = sorted(set(query("SELECT unit FROM items WHERE client_id=?", (cid,))["unit"]) |
-                       set(query("SELECT u.unit_name FROM item_units u JOIN items i ON i.id=u.item_id WHERE i.client_id=?", (cid,))["unit_name"]))
-    grid = pd.DataFrame({"الصنف": [None] * 3, "الوحدة": [None] * 3, "الكمية": [0.0] * 3, "السعر (اختياري مع الفاتورة)": [None] * 3})
-    ed = st.data_editor(grid, num_rows="dynamic", use_container_width=True, key=f"ret_grid_{inv_id}", column_config={
-        "الصنف": st.column_config.SelectboxColumn(options=names, required=True),
-        "الوحدة": st.column_config.SelectboxColumn(options=unit_opts, help="فارغة = وحدة الاستهلاك"),
-        "الكمية": st.column_config.NumberColumn(min_value=0.0, format="%.3f"),
-        "السعر (اختياري مع الفاتورة)": st.column_config.NumberColumn(min_value=0.0, format="%.2f")})
+
+    lines, problems = (_return_lines_from_invoice(cid, inv_id, rn) if inv_id else _return_lines_manual(cid, rn))
+
+    t = services.calc_invoice([(l["qty"], l["price"] or 0) for l in lines], vr, wr)
+    m = st.columns(4)
+    m[0].metric("قبل الضريبة", f"{t['subtotal']:,.2f}")
+    m[1].metric(f"ضريبة القيمة المضافة ({vr:g}%)", f"{t['vat']:,.2f}")
+    m[2].metric(f"ضريبة الخصم ({wr:g}%)", f"- {t['wht']:,.2f}")
+    m[3].metric("صافي الإشعار الدائن", f"{t['net_due']:,.2f}")
+    if not inv_id:
+        st.caption("بدون فاتورة: المعاينة بالسعر المُدخل وبدون ضرائب.")
     refund = 0.0
     if method != "none":
-        refund = st.number_input("المبلغ المسترد من المورد", min_value=0.0, step=50.0, key="ret_refund")
-    notes = st.text_input("ملاحظات", key="ret_notes")
-    st.caption("يُخصم الصنف من الدفعة الأقرب انتهاءً (FEFO)، وتُعكس ضريبة القيمة المضافة وضريبة الخصم بنسبة الفاتورة الأصلية.")
-    if st.button("💾 حفظ المرتجع", type="primary", key="ret_save"):
-        ids = dict(query("SELECT name, id FROM items WHERE client_id=?", (cid,)).values)
-        lines = []
-        for _, r in ed.iterrows():
-            if r["الصنف"] in ids and r["الكمية"] and r["الكمية"] > 0:
-                pr = r["السعر (اختياري مع الفاتورة)"]
-                lines.append({"item_id": int(ids[r["الصنف"]]), "unit": r["الوحدة"] if isinstance(r["الوحدة"], str) else None,
-                              "qty": float(r["الكمية"]), "price": None if pd.isna(pr) else float(pr)})
+        r1, r2 = st.columns(2)
+        if r1.checkbox("استرداد كامل صافي الإشعار الدائن", value=True, key=f"ret_full_refund_{rn}"):
+            refund = t["net_due"]
+            r2.write(f"**المبلغ المسترد:** {refund:,.2f}")
+        else:
+            refund = r2.number_input("المبلغ المسترد من المورد", min_value=0.0, step=50.0, key=f"ret_refund_{rn}")
+    notes = st.text_input("ملاحظات", key=f"ret_notes_{rn}")
+    st.caption("يُخصم الصنف أولًا من الدفعة التي أدخلتها الفاتورة إن كانت ما زالت بالمخزن، ثم من الأقرب انتهاءً (FEFO).")
+    for p in problems:
+        st.error(p)
+    if st.button("💾 حفظ المرتجع", type="primary", key="ret_save", disabled=bool(problems) or not lines):
         try:
             rid, tot = documents.create_return(cid, sid, day, lines, reason, user, invoice_id=inv_id,
                                                warehouse_id=int(whs.loc[whs["name"] == wname, "id"].iloc[0]),
                                                refund_method=method, refund_amount=refund, notes=notes)
             st.session_state["last_return"] = rid
+            st.session_state["ret_nonce"] = rn + 1
             st.rerun()
         except ValueError as ex:
             st.error(str(ex))
@@ -350,10 +545,11 @@ def _returns_tab(cid, user):
     if rl.empty:
         st.info("لا توجد مرتجعات في هذه الفترة.")
         return
-    st.dataframe(rl, use_container_width=True, hide_index=True)
-    export_buttons(rl, "مرتجعات المشتريات", "purchase_returns", subtitle=f"{auth.client_name()} — من {f1} إلى {t1}",
+    st.dataframe(rl.drop(columns="رقم"), use_container_width=True, hide_index=True)
+    export_buttons(rl.drop(columns="رقم"), "مرتجعات المشتريات", "purchase_returns", subtitle=f"{auth.client_name()} — من {f1} إلى {t1}",
                    totals=["قبل الضريبة", "الضريبة", "الإجمالي", "صافي الإشعار الدائن", "المسترد"], key="ret_exp")
-    pk = st.selectbox("عرض مرتجع", rl["رقم"], key="ret_pick")
+    rlab = dict(zip(rl["رقم"], rl["رقم المرتجع"]))
+    pk = st.selectbox("عرض مرتجع", rl["رقم"], key="ret_pick", format_func=lambda i: sequences.label(rlab.get(i), i))
     st.dataframe(reports.return_lines(int(pk)).round(3), use_container_width=True, hide_index=True)
     voided = rl.loc[rl["رقم"] == pk, "الحالة"].iloc[0] == "ملغي"
     if not voided:
@@ -389,20 +585,28 @@ def render():
         f = d1.date_input("من", date.today() - timedelta(days=90), key="inv_from")
         t = d2.date_input("إلى", date.today(), key="inv_to")
         show_void = st.checkbox("إظهار الفواتير الملغاة", key="inv_show_void")
-        inv = query("""SELECT p.id AS "رقم", p.invoice_date AS "التاريخ", s.name AS "المورد", p.invoice_no AS "رقم المورد",
+        inv = query("""SELECT p.id AS "رقم", COALESCE(p.doc_no,'') AS "رقم الفاتورة", p.invoice_date AS "التاريخ", s.name AS "المورد", p.invoice_no AS "رقم المورد",
                        COALESCE(p.subtotal, p.total) AS "قبل الضريبة", p.total AS "الإجمالي", COALESCE(p.wht_amount,0) AS "ضريبة الخصم",
                        p.total - COALESCE(p.wht_amount,0) AS "صافي المستحق", p.paid AS "المدفوع",
                        p.total - COALESCE(p.wht_amount,0) - p.paid AS "المتبقي", COALESCE(w.name,'') AS "المخزن",
                        CASE WHEN p.image_path IS NULL OR p.image_path='' THEN '' ELSE '📎' END AS "صورة",
-                       CASE WHEN COALESCE(p.status,'active')='voided' THEN 'ملغاة' ELSE '' END AS "الحالة", p.created_by AS "أدخلها"
+                       CASE WHEN COALESCE(p.status,'active')='voided' THEN 'ملغاة'
+                            WHEN EXISTS (SELECT 1 FROM purchase_adjustments a WHERE a.invoice_id=p.id) THEN 'معدّلة' ELSE '' END AS "الحالة",
+                       p.created_by AS "أدخلها"
                        FROM purchase_invoices p JOIN suppliers s ON s.id=p.supplier_id LEFT JOIN warehouses w ON w.id=p.warehouse_id
                        WHERE p.client_id=? AND p.invoice_date BETWEEN ? AND ? AND (? OR COALESCE(p.status,'active')='active')
                        ORDER BY p.invoice_date DESC, p.id DESC""", (cid, str(f), str(t), 1 if show_void else 0))
-        _tbl19 = inv
+        q = st.text_input("بحث برقم الفاتورة أو رقم فاتورة المورد", key="inv_q").strip()
+        if q:
+            inv = inv[inv["رقم الفاتورة"].str.contains(q, case=False, regex=False) |
+                      inv["رقم المورد"].fillna("").astype(str).str.contains(q, case=False, regex=False)]
+        _tbl19 = inv.drop(columns="رقم")
         st.dataframe(_tbl19, use_container_width=True, hide_index=True)
         export_buttons(_tbl19, "فواتير المشتريات", "purchase_invoices", subtitle=f"{auth.client_name()} — من {f} إلى {t}", totals=["قبل الضريبة", "الإجمالي", "ضريبة الخصم", "صافي المستحق", "المدفوع", "المتبقي"], key="pur_list")
         if not inv.empty:
-            pick = st.selectbox("عرض فاتورة (الرقم)", inv["رقم"], key="inv_pick")
+            labels = dict(zip(inv["رقم"], inv["رقم الفاتورة"]))
+            pick = st.selectbox("عرض فاتورة", inv["رقم"], key="inv_pick",
+                                format_func=lambda i: f"{sequences.label(labels.get(i), i)} — {inv.loc[inv['رقم'] == i, 'المورد'].iloc[0]}")
             show_invoice(cid, pick)
             _invoice_tools(cid, user, int(pick), voided=(inv.loc[inv["رقم"] == pick, "الحالة"].iloc[0] == "ملغاة"))
 
@@ -527,7 +731,7 @@ def render():
                         st.rerun()
                     except ValueError as e:
                         st.error(str(e))
-            _tbl16 = query("""SELECT p.pay_date AS "التاريخ", s.name AS "المورد", p.amount AS "المبلغ", p.note AS "ملاحظة",
+            _tbl16 = query("""SELECT COALESCE(p.doc_no,'') AS "رقم الدفعة", p.pay_date AS "التاريخ", s.name AS "المورد", p.amount AS "المبلغ", p.note AS "ملاحظة",
                                   COALESCE(p.pay_method,'cash') AS "الدفع", p.created_by AS "سجّلها" FROM supplier_payments p
                                   JOIN suppliers s ON s.id=p.supplier_id WHERE p.client_id=? ORDER BY p.pay_date DESC, p.id DESC""", (cid,))
             st.dataframe(_tbl16, use_container_width=True, hide_index=True)

@@ -4,13 +4,13 @@ import streamlit as st
 
 from database.db import query
 from utils.export_ui import export_buttons, Section, FMT_QTY, FMT_MONEY, FMT_COST
-from utils import theme, auth, inventory, reports, documents, controls
+from utils import theme, auth, inventory, reports, documents, controls, sequences
 
 
 def _voucher_card(cid, v, user, can_act=True):
     with st.container(border=True):
         a, b, c = st.columns([2, 2, 1])
-        a.markdown(f"**إذن تحويل رقم {int(v['id']):05d}** — {v['voucher_date']}")
+        a.markdown(f"**إذن تحويل {sequences.label(v['doc_no'], v['id'])}** — {v['voucher_date']}")
         b.write(f"من **{v['from_name']}** إلى **{v['to_name']}**")
         c.write(inventory.STATUS_AR.get(v["status"], v["status"]) + (" — معكوس" if int(v.get("is_voided", 0) or 0) else ""))
         st.dataframe(inventory.voucher_lines(int(v["id"])).round(4), use_container_width=True, hide_index=True)
@@ -127,9 +127,10 @@ def render():
         for _, v in vs.head(30).iterrows():
             _voucher_card(cid, v, user)
         if not vs.empty:
-            pv = st.selectbox("طباعة / تصدير إذن", list(vs["id"]), format_func=lambda i: f"إذن رقم {int(i):05d}", key="vch_print")
+            vnos = dict(zip(vs["id"], vs["doc_no"]))
+            pv = st.selectbox("طباعة / تصدير إذن", list(vs["id"]), format_func=lambda i: f"إذن {sequences.label(vnos.get(i), i)}", key="vch_print")
             vrow = vs[vs["id"] == pv].iloc[0]
-            export_buttons(inventory.voucher_lines(int(pv)), f"إذن تحويل بين المخازن رقم {int(pv):05d}", "transfer_voucher",
+            export_buttons(inventory.voucher_lines(int(pv)), f"إذن تحويل بين المخازن {sequences.label(vrow['doc_no'], pv)}", "transfer_voucher",
                            subtitle=f"من {vrow['from_name']} إلى {vrow['to_name']} — {vrow['voucher_date']} — {inventory.STATUS_AR.get(vrow['status'], '')}",
                            formats={"الكمية": FMT_QTY, "ما يعادل (وحدة الاستهلاك)": FMT_QTY}, key="vch_exp")
             _voided = bool(int(vrow.get("is_voided", 0) or 0))

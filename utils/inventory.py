@@ -11,7 +11,7 @@ import pandas as pd
 from database.db import tx, query
 from utils.audit import log
 from utils.security import guard
-from utils import controls
+from utils import controls, sequences
 
 DECIMALS = 6
 DISCRETE_UNITS = {"قطعة", "حبة", "علبة", "كيس", "كرتونة", "عبوة", "رغيف", "piece", "pcs", "pc", "unit", "can", "bag", "box"}
@@ -155,6 +155,21 @@ def wac_add(c, item_id, base_qty, value) -> None:
     c.execute("UPDATE items SET avg_cost=? WHERE id=?", (round(float(avg), 8), item_id))
 
 
+def wac_correct(c, item_id, base_delta, value_delta) -> None:
+    """تصحيح المتوسط المرجح عند تعديل سطر شراء: يستبدل مساهمة السطر القديمة بالجديدة (فرق الكمية وفرق القيمة).
+
+    يُستدعى قبل تعديل الرصيد. فرق قيمة الكميات التي استُهلكت يُحمَّل على الرصيد المتبقي (نفس معالجة الإلغاء والاستبدال).
+    """
+    old_qty, old_avg = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=?", (item_id,)).fetchone()
+    new_qty = float(old_qty) + float(base_delta)
+    avg = float(old_avg)
+    if new_qty > 1e-9:
+        cand = (float(old_qty) * float(old_avg) + float(value_delta)) / new_qty
+        if cand >= 0:
+            avg = cand
+    c.execute("UPDATE items SET avg_cost=? WHERE id=?", (round(avg, 8), item_id))
+
+
 def unit_table(c, item_id):
     r = c.execute("SELECT unit FROM items WHERE id=?", (item_id,)).fetchone()
     if not r:
@@ -295,6 +310,7 @@ def create_voucher(cid, from_wh, to_wh, day, lines, notes, user):
         vid = c.execute("INSERT INTO transfer_vouchers(client_id,voucher_date,from_wh,to_wh,status,notes,created_by,created_at) "
                         "VALUES(?,?,?,?,'pending',?,?,datetime('now','localtime'))",
                         (cid, str(day), from_wh, to_wh, (notes or "").strip(), user)).lastrowid
+        doc_no = sequences.assign(c, cid, "transfer_voucher", vid, day)
         for item_id, qty, unit in lines:
             if not c.execute("SELECT 1 FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone():
                 raise ValueError("صنف غير موجود لهذا المطعم.")
@@ -303,7 +319,7 @@ def create_voucher(cid, from_wh, to_wh, day, lines, notes, user):
             bq, factor, uname = to_base(c, item_id, qty, unit, strict_discrete=True)
             c.execute("INSERT INTO transfer_lines(voucher_id,item_id,entered_qty,unit_name,unit_factor,base_qty) VALUES(?,?,?,?,?,?)",
                       (vid, item_id, float(qty), uname, factor, bq))
-        log(c, user, "create", "transfer", vid, f"إذن تحويل #{vid} ({len(lines)} صنف)", None, cid)
+        log(c, user, "create", "transfer", vid, f"إذن تحويل {doc_no} ({len(lines)} صنف)", None, cid)
     return vid
 
 
@@ -353,7 +369,7 @@ def cancel_voucher(cid, voucher_id, user):
 
 
 def vouchers(cid, status=None) -> pd.DataFrame:
-    df = query("""SELECT v.id, v.voucher_date, w1.name AS from_name, w2.name AS to_name, v.status, v.notes,
+    df = query("""SELECT v.id, v.doc_no, v.voucher_date, w1.name AS from_name, w2.name AS to_name, v.status, v.notes,
                   v.created_by, v.approved_by, v.approved_at, COALESCE(v.is_voided,0) AS is_voided, v.void_reason,
                   (SELECT COUNT(*) FROM transfer_lines l WHERE l.voucher_id=v.id) AS lines_count
                   FROM transfer_vouchers v JOIN warehouses w1 ON w1.id=v.from_wh JOIN warehouses w2 ON w2.id=v.to_wh
@@ -376,6 +392,7 @@ def apply_stocktake(cid, wh_id, day, counts: dict, user, apply_adjustment: bool)
         controls.check_open(c, cid, day)
         tid = c.execute("INSERT INTO stocktakes(client_id,count_date,warehouse_id,created_by) VALUES(?,?,?,?)",
                         (cid, str(day), wh_id, user)).lastrowid
+        sequences.assign(c, cid, "stocktake", tid, day)
         value_diff = 0.0
         for item_id, actual in counts.items():
             row = c.execute("SELECT avg_cost, last_price FROM items WHERE id=? AND client_id=?", (item_id, cid)).fetchone()

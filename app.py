@@ -1,22 +1,23 @@
 """سند للأعمال - نقطة التشغيل. التشغيل: streamlit run app.py"""
 import streamlit as st
 
-from database.db import init_db, backup_db
+from database.db import init_db, backup_db, schema_version
 from utils import theme, auth, security, config, controls
 
 st.set_page_config(page_title="سند للأعمال", page_icon=str(theme.LOGO), layout="wide")
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _bootstrap() -> bool:
-    """تهيئة القاعدة والترقية والمدير الأول والنسخ الاحتياطي: مرة لكل عملية، وتتجدد كل ساعة."""
+def _bootstrap(_schema: int) -> bool:
+    """تهيئة المخازن الافتراضية والمدير الأول والنسخ الاحتياطي. بصمة البنية جزء من مفتاح التخزين المؤقت،
+    فتُعاد التهيئة فورًا بعد أي تحديث للكود (وترقية البنية نفسها تتم تلقائيًا عند كل اتصال بالقاعدة)."""
     init_db()
     security.ensure_admin()
     backup_db()
     return True
 
 
-_bootstrap()
+_bootstrap(schema_version())
 theme.inject_css()
 auth.refresh_session()
 

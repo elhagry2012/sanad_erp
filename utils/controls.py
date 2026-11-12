@@ -1,4 +1,5 @@
 """الضوابط: إقفال الفترات، الإعدادات، الإشعارات، تنبيهات الحركات الكبيرة، وطلبات التعديل بموافقة المدير العام."""
+import json
 import re
 from datetime import datetime
 
@@ -119,10 +120,15 @@ def mark_read(username, is_admin, ids=None) -> None:
 
 
 # ============================================================ طلبات التعديل
-def create_edit_request(cid, doc_type, doc_id, reason, proposed, user) -> int:
+REQUEST_KINDS = {"general": "طلب تعديل/إلغاء", "adjust": "تعديل مباشر (كميات/أسعار)"}
+
+
+def create_edit_request(cid, doc_type, doc_id, reason, proposed, user, kind="general", payload=None) -> int:
     if doc_type not in DOC_TYPES:
         raise ValueError("نوع مستند غير مدعوم.")
     label, table, module = DOC_TYPES[doc_type]
+    if kind not in REQUEST_KINDS:
+        raise ValueError("نوع الطلب غير صحيح.")
     if not (reason or "").strip():
         raise ValueError("سبب الطلب مطلوب.")
     require(user, module, cid, edit=False)                       # يكفي أن يرى المستند
@@ -132,11 +138,65 @@ def create_edit_request(cid, doc_type, doc_id, reason, proposed, user) -> int:
             raise ValueError("المستند غير موجود لهذا المطعم.")
         if c.execute("SELECT 1 FROM edit_requests WHERE doc_type=? AND doc_id=? AND status='pending'", (doc_type, doc_id)).fetchone():
             raise ValueError("يوجد طلب تعديل معلّق لهذا المستند بالفعل.")
-        rid = c.execute("INSERT INTO edit_requests(client_id,doc_type,doc_id,requested_by,reason,proposed,created_at) VALUES(?,?,?,?,?,?,?)",
-                        (cid, doc_type, doc_id, user, reason.strip(), (proposed or "").strip(), _now())).lastrowid
-        notify(c, "admin", "edit_request", f"طلب تعديل: {label} #{doc_id}", f"{user}: {reason.strip()}", cid, ("edit_request", rid))
-        log(c, user, "create", "edit_request", rid, f"{label} #{doc_id}: {reason.strip()}", None, cid)
+        rid = c.execute("INSERT INTO edit_requests(client_id,doc_type,doc_id,requested_by,reason,proposed,created_at,request_kind,payload) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)", (cid, doc_type, doc_id, user, reason.strip(), (proposed or "").strip(), _now(), kind,
+                                                      json.dumps(payload, ensure_ascii=False) if payload is not None else None)).lastrowid
+        dn = _doc_no(c, table, doc_id)
+        notify(c, "admin", "edit_request", f"{REQUEST_KINDS[kind]}: {label} {dn}", f"{user}: {reason.strip()}", cid, ("edit_request", rid))
+        log(c, user, "create", "edit_request", rid, f"{REQUEST_KINDS[kind]} - {label} {dn}: {reason.strip()}", None, cid)
     return rid
+
+
+def _doc_no(c, table, doc_id) -> str:
+    try:
+        r = c.execute(f"SELECT doc_no FROM {table} WHERE id=?", (doc_id,)).fetchone()
+    except Exception:
+        r = None
+    return r[0] if r and r[0] else f"#{doc_id}"
+
+
+def resolve_doc(cid, doc_type, ref) -> int:
+    """يحوّل ما يكتبه المستخدم (رقم المستند مثل PI-2026-00012، أو الرقم الداخلي) إلى معرّف المستند."""
+    if doc_type not in DOC_TYPES:
+        raise ValueError("نوع مستند غير مدعوم.")
+    table = DOC_TYPES[doc_type][1]
+    ref = (ref or "").strip()
+    if not ref:
+        raise ValueError("أدخل رقم المستند.")
+    try:
+        df = query(f"SELECT id FROM {table} WHERE client_id=? AND doc_no=?", (cid, ref))
+    except Exception:
+        df = pd.DataFrame()
+    if not df.empty:
+        return int(df["id"].iloc[0])
+    if ref.lstrip("#").isdigit():
+        return int(ref.lstrip("#"))
+    raise ValueError(f"لا يوجد مستند بالرقم «{ref}» لهذا المطعم.")
+
+
+def create_adjust_request(cid, invoice_id, changes, reason, user) -> int:
+    """طلب تعديل مباشر لفاتورة شراء: الموظف يقترح الكميات/الأسعار الصحيحة لأسطر محددة، والمدير العام يعتمدها فتُطبَّق تلقائيًا.
+
+    تُحفظ القيم الحالية لكل سطر مع الطلب، فإن تغيّرت الفاتورة قبل الاعتماد يُرفض التطبيق بدل تطبيق فرق خاطئ.
+    """
+    from utils import documents
+    pv = documents.preview_adjustment(cid, invoice_id, changes)     # يتحقق من صحة التعديل قبل الإرسال
+    lines = [{"line_id": p["line_id"], "qty": p["new_qty"], "price": p["new_price"], "old_qty": p["qty"], "old_price": p["price"]}
+             for p in pv["plan"]]
+    summary = "؛ ".join(f"{p['name']}: الكمية {p['qty']:g}→{p['new_qty']:g} {p['unit']}، السعر {p['price']:g}→{p['new_price']:g}"
+                        for p in pv["plan"])
+    summary += f" | الإجمالي {pv['before']['total']:,.2f} → {pv['after']['total']:,.2f}"
+    return create_edit_request(cid, "purchase_invoice", invoice_id, reason, summary, user, kind="adjust", payload={"lines": lines})
+
+
+def request_changes(payload) -> list:
+    """أسطر التعديل من حمولة الطلب (JSON)."""
+    if payload is None or (not isinstance(payload, str) and pd.isna(payload)) or not payload:
+        return []
+    try:
+        return list(json.loads(payload).get("lines") or [])
+    except (ValueError, AttributeError):
+        return []
 
 
 def requests_df(status=None, user=None, cid=None) -> pd.DataFrame:
@@ -151,6 +211,17 @@ def requests_df(status=None, user=None, cid=None) -> pd.DataFrame:
     df = query(sql + " ORDER BY r.id DESC", tuple(params))
     if not df.empty:
         df["doc_label"] = df["doc_type"].map(lambda t: DOC_TYPES.get(t, (t,))[0])
+        df["kind_label"] = df["request_kind"].fillna("general").map(lambda k: REQUEST_KINDS.get(k, k))
+        nos = {}
+        for t, (_, table, _) in DOC_TYPES.items():
+            ids = df.loc[df["doc_type"] == t, "doc_id"].astype(int).tolist()
+            if ids:
+                try:
+                    got = query(f"SELECT id, doc_no FROM {table} WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))
+                    nos.update({(t, int(r["id"])): r["doc_no"] for _, r in got.iterrows() if isinstance(r["doc_no"], str)})
+                except Exception:
+                    pass
+        df["doc_no"] = [nos.get((t, int(i)), f"#{int(i)}") for t, i in zip(df["doc_type"], df["doc_id"])]
     return df
 
 
@@ -172,24 +243,48 @@ def _execute_void(doc_type, doc_id, cid, reason, by, allow_negative):
         services.delete_waste(doc_id, by, cid)
 
 
-def decide_request(req_id, approve, note, by, execute=False, allow_negative=False) -> None:
-    """المدير العام يقبل/يرفض. عند القبول مع execute يُنفَّذ الإلغاء/العكس فورًا (وإن فشل يبقى الطلب معلّقًا)."""
+def _close_request(c, req_id, approve, note, by, cid, doc_type, doc_id, requester, extra="", result_ref=None) -> None:
+    label = DOC_TYPES.get(doc_type, (doc_type,))[0]
+    dn = _doc_no(c, DOC_TYPES[doc_type][1], doc_id) if doc_type in DOC_TYPES else f"#{doc_id}"
+    c.execute("UPDATE edit_requests SET status=?, decided_by=?, decision_note=?, decided_at=?, result_ref=? WHERE id=? AND status='pending'",
+              ("approved" if approve else "rejected", by, (note or "").strip(), _now(), result_ref, req_id))
+    verdict = "تم قبول" if approve else "تم رفض"
+    body = " — ".join(x for x in ((note or "").strip(), extra) if x)
+    notify(c, requester, "edit_decision", f"{verdict} طلب تعديل {label} {dn}", body, cid, ("edit_request", req_id))
+    log(c, by, "approve" if approve else "reject", "edit_request", req_id,
+        f"{label} {dn} ({requester})" + (f": {note}" if note else ""), None, cid)
+
+
+def decide_request(req_id, approve, note, by, execute=False, allow_negative=False, changes=None) -> None:
+    """المدير العام يقبل/يرفض. عند القبول مع execute يُنفَّذ الطلب فورًا (وإن فشل يبقى الطلب معلّقًا):
+
+    - طلب عام: إلغاء/عكس المستند.
+    - طلب تعديل مباشر: تُطبَّق الكميات/الأسعار المقترحة (أو ما عدّله المدير في changes) على الفاتورة، في نفس معاملة إغلاق الطلب.
+    """
     _require_admin(by)
     with tx() as c:
-        r = c.execute("SELECT client_id, doc_type, doc_id, requested_by, reason, status FROM edit_requests WHERE id=?", (req_id,)).fetchone()
+        r = c.execute("SELECT client_id, doc_type, doc_id, requested_by, reason, status, COALESCE(request_kind,'general'), payload "
+                      "FROM edit_requests WHERE id=?", (req_id,)).fetchone()
     if not r:
         raise ValueError("الطلب غير موجود.")
-    cid, doc_type, doc_id, requester, reason, status = r
+    cid, doc_type, doc_id, requester, reason, status, kind, payload = r
     if status != "pending":
         raise ValueError("تم البت في هذا الطلب من قبل.")
+    if approve and execute and kind == "adjust":
+        from utils import documents
+        lines = changes if changes is not None else request_changes(payload)
+        if not lines:
+            raise ValueError("الطلب لا يحتوي أسطر تعديل.")
+        with tx() as c:
+            if c.execute("SELECT status FROM edit_requests WHERE id=?", (req_id,)).fetchone()[0] != "pending":
+                raise ValueError("تم البت في هذا الطلب من قبل.")
+            adj_id, adj_no, before, after = documents._adjust_purchase_c(
+                c, cid, doc_id, lines, f"بناءً على طلب {requester}: {reason}", by, allow_negative, request_id=req_id, requested_by=requester)
+            _close_request(c, req_id, True, note, by, cid, doc_type, doc_id, requester,
+                           f"طُبّق التعديل {adj_no}: الإجمالي {before['total']:,.2f} → {after['total']:,.2f}.", adj_id)
+        return
     if approve and execute:
         _execute_void(doc_type, doc_id, cid, f"بناءً على طلب {requester}: {reason}", by, allow_negative)
-    label = DOC_TYPES.get(doc_type, (doc_type,))[0]
     with tx() as c:
-        c.execute("UPDATE edit_requests SET status=?, decided_by=?, decision_note=?, decided_at=? WHERE id=?",
-                  ("approved" if approve else "rejected", by, (note or "").strip(), _now(), req_id))
-        verdict = "تم قبول" if approve else "تم رفض"
-        notify(c, requester, "edit_decision", f"{verdict} طلب تعديل {label} #{doc_id}",
-               (note or "").strip() + (" — نُفّذ الإلغاء/العكس تلقائيًا." if approve and execute else ""), cid, ("edit_request", req_id))
-        log(c, by, "approve" if approve else "reject", "edit_request", req_id,
-            f"{label} #{doc_id} ({requester})" + (f": {note}" if note else ""), None, cid)
+        _close_request(c, req_id, approve, note, by, cid, doc_type, doc_id, requester,
+                       "نُفّذ الإلغاء/العكس تلقائيًا." if approve and execute else "")

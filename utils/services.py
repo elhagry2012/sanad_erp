@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from database.db import tx, query, IMAGES_DIR
-from utils import treasury, inventory as inv, controls
+from utils import treasury, inventory as inv, controls, sequences
 from utils.ledger import SUPPLIER_BALANCE
 from utils.audit import log
 from utils.security import guard, require, client_of
@@ -209,6 +209,7 @@ def _add_purchase_c(c, cid, supplier_id, invoice_no, inv_date, lines, t, paid, u
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, supplier_id, invoice_no.strip(), str(inv_date), t["total"], paid, t["subtotal"], vat_rate,
          t["vat"], wht_rate, t["wht"], saved_image, wh, pay_method, user, replaces_id)).lastrowid
+    doc_no = sequences.assign(c, cid, "purchase_invoice", invoice, inv_date)
     created = {}
     for l in lines:
         item_id, unit = l["item_id"], l["unit"]
@@ -249,7 +250,7 @@ def _add_purchase_c(c, cid, supplier_id, invoice_no, inv_date, lines, t, paid, u
         treasury.post(c, cid, inv_date, "out", paid, "مشتريات",
                       f"سداد فاتورة شراء {invoice_no.strip() or invoice}", "purchase_invoice", invoice, user, account)
     log(c, user, "create", "purchase_invoice", invoice,
-        f"فاتورة {invoice_no.strip() or invoice} - {len(lines)} صنف" + (" - بصورة مرفقة" if saved_image else "") +
+        f"فاتورة {doc_no} (رقم المورد {invoice_no.strip() or '—'}) - {len(lines)} صنف" + (" - بصورة مرفقة" if saved_image else "") +
         (f" - بديلة للفاتورة #{replaces_id}" if replaces_id else ""), t["total"], cid)
     controls.notify_if_large(c, cid, "thr_purchase", t["total"], f"فاتورة شراء {invoice_no.strip() or invoice}", user)
     return invoice
@@ -291,10 +292,11 @@ def add_payment(cid, supplier_id, pay_date, amount, note, user, pay_method="cash
             raise ValueError("المورد غير موجود.")
         pid = c.execute("INSERT INTO supplier_payments(client_id,supplier_id,pay_date,amount,note,pay_method,created_by) "
                         "VALUES(?,?,?,?,?,?,?)", (cid, supplier_id, str(pay_date), amount, note.strip(), pay_method, user)).lastrowid
+        doc_no = sequences.assign(c, cid, "supplier_payment", pid, pay_date)
         if account:
             treasury.post(c, cid, pay_date, "out", amount, "دفعة مورد",
                           f"{sup[0]} {('- ' + note.strip()) if note.strip() else ''}".strip(), "supplier_payment", pid, user, account)
-        log(c, user, "create", "supplier_payment", pid, note.strip(), amount, cid)
+        log(c, user, "create", "supplier_payment", pid, f"{doc_no} {note.strip()}".strip(), amount, cid)
         controls.notify_if_large(c, cid, "thr_payment", amount, f"دفعة لمورد {sup[0]}", user)
 
 
@@ -417,6 +419,7 @@ def produce_batch(cid, recipe_id, runs, day, user, allow_negative=False, warehou
         out_qty = inv.rnd(yld * runs)
         batch = c.execute("INSERT INTO production_batches(client_id,recipe_id,batch_date,output_qty,total_cost,created_by) "
                           "VALUES(?,?,?,?,?,?)", (cid, recipe_id, str(day), out_qty, cost, user)).lastrowid
+        sequences.assign(c, cid, "production_batch", batch, day)
         for item_id, q, a, l_, _ in lines:
             inv.adj_move(c, cid, item_id, wh, day, "production_out", -q, inv.unit_cost(a, l_), batch, user)
         old_qty, old_avg = c.execute("SELECT qty_on_hand, avg_cost FROM items WHERE id=?", (out_id,)).fetchone()
@@ -530,6 +533,7 @@ def record_waste(cid, day, item_id, qty, reason, user, warehouse_id=None, unit=N
         cost = bq * uc
         wid = c.execute("INSERT INTO waste_log(client_id,waste_date,item_id,qty,reason,cost,warehouse_id,created_by) "
                         "VALUES(?,?,?,?,?,?,?,?)", (cid, str(day), item_id, bq, reason, cost, wh, user)).lastrowid
+        sequences.assign(c, cid, "waste", wid, day)
         inv.adj_move(c, cid, item_id, wh, day, "waste", -bq, uc, wid, user)
         log(c, user, "create", "waste", wid, reason, cost, cid)
     return cost
@@ -551,6 +555,7 @@ def record_waste_dish(cid, day, dish_id, qty, reason, user, warehouse_id=None):
         cost = sum(rq * qty * inv.unit_cost(a, l_) for _, rq, a, l_ in comps)
         wid = c.execute("INSERT INTO waste_log(client_id,waste_date,dish_id,qty,reason,cost,warehouse_id,created_by) "
                         "VALUES(?,?,?,?,?,?,?,?)", (cid, str(day), dish_id, qty, reason, cost, wh, user)).lastrowid
+        sequences.assign(c, cid, "waste", wid, day)
         for item_id, rq, a, l_ in comps:
             inv.adj_move(c, cid, item_id, wh, day, "waste", -rq * qty, inv.unit_cost(a, l_), wid, user)
         log(c, user, "create", "waste", wid, f"وجبة {d[1]} × {qty:g} - {reason}", cost, cid)
@@ -600,6 +605,7 @@ def add_expense(cid, category_id, day, amount, note, user, pay_method="cash", fr
             raise ValueError("بند المصروف غير موجود.")
         eid = c.execute("INSERT INTO expenses(client_id,category_id,exp_date,amount,note,pay_method,created_by) VALUES(?,?,?,?,?,?,?)",
                         (cid, category_id, str(day), amount, note.strip(), pay_method, user)).lastrowid
+        sequences.assign(c, cid, "expense", eid, day)
         if account:
             treasury.post(c, cid, day, "out", amount, "مصروف", f"{cat[0]} {('- ' + note.strip()) if note.strip() else ''}".strip(),
                           "expense", eid, user, account)

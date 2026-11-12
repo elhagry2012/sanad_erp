@@ -57,7 +57,7 @@ def render():
                         st.error(str(e))
 
     def load(f, t):
-        return query("""SELECT w.id, w.waste_date AS d, COALESCE(i.name, 'وجبة: ' || dd.name) AS what, w.qty, COALESCE(i.unit,'وجبة') AS unit,
+        return query("""SELECT w.id, COALESCE(w.doc_no,'') AS doc_no, w.waste_date AS d, COALESCE(i.name, 'وجبة: ' || dd.name) AS what, w.qty, COALESCE(i.unit,'وجبة') AS unit,
                         w.reason, w.cost, COALESCE(wh.name,'') AS wh, w.created_by FROM waste_log w
                         LEFT JOIN items i ON i.id=w.item_id LEFT JOIN dishes dd ON dd.id=w.dish_id
                         LEFT JOIN warehouses wh ON wh.id=w.warehouse_id
@@ -72,12 +72,13 @@ def render():
             st.info("لا يوجد هدر مسجل في هذه الفترة.")
         else:
             st.metric("قيمة الهدر", f"{df['cost'].sum():,.2f}")
-            _tbl13 = df.rename(columns={"d": "التاريخ", "what": "البند", "qty": "الكمية", "unit": "الوحدة", "reason": "السبب",
+            _tbl13 = df.drop(columns="id").rename(columns={"doc_no": "رقم المستند", "d": "التاريخ", "what": "البند", "qty": "الكمية", "unit": "الوحدة", "reason": "السبب",
                                             "cost": "القيمة", "wh": "المخزن", "created_by": "سجّله"})
-            st.dataframe(_tbl13.round(3), use_container_width=True, hide_index=True, column_config={"id": "رقم"})
-            export_buttons(_tbl13.rename(columns={"id": "رقم"}), "سجل الهدر والتالف", "waste_log", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "القيمة": FMT_MONEY}, totals=["القيمة"], key="waste_log")
+            st.dataframe(_tbl13.round(3), use_container_width=True, hide_index=True)
+            export_buttons(_tbl13, "سجل الهدر والتالف", "waste_log", subtitle=f"{auth.client_name()} — من {f} إلى {t}", formats={"الكمية": FMT_QTY, "القيمة": FMT_MONEY}, totals=["القيمة"], key="waste_log")
             c1, c2 = st.columns([2, 1])
-            wid = c1.selectbox("حذف تسجيل (يعيد الكمية للمخزن)", df["id"], key="w_del")
+            wnos = dict(zip(df["id"], df["doc_no"]))
+            wid = c1.selectbox("حذف تسجيل (يعيد الكمية للمخزن)", df["id"], key="w_del", format_func=lambda i: wnos.get(i) or f"#{i}")
             if c2.button("حذف"):
                 try:
                     services.delete_waste(int(wid), user, cid)
