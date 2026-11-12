@@ -1,7 +1,7 @@
 """سند للأعمال - نقطة التشغيل. التشغيل: streamlit run app.py"""
 import streamlit as st
 
-from database.db import init_db, backup_db, schema_version
+from database.db import init_db, backup_db, schema_version, ensure_schema
 from utils import theme, auth, security, config, controls, i18n
 
 i18n.install()                                  # ترجمة الواجهة عند اختيار English (مرة لكل عملية خادم؛ لا أثر في العربية)
@@ -9,7 +9,7 @@ st.set_page_config(page_title=i18n.t("سند للأعمال"), page_icon=str(the
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _bootstrap(_schema: int) -> bool:
+def _bootstrap(schema: int) -> bool:
     """تهيئة المخازن الافتراضية والمدير الأول والنسخ الاحتياطي. بصمة البنية جزء من مفتاح التخزين المؤقت،
     فتُعاد التهيئة فورًا بعد أي تحديث للكود (وترقية البنية نفسها تتم تلقائيًا عند كل اتصال بالقاعدة)."""
     init_db()
@@ -28,7 +28,8 @@ def _pwa_version() -> str:
         return ""
 
 
-_bootstrap(schema_version())
+ensure_schema()                                 # كل تحميل: القاعدة تُرحَّل تلقائيًا (بعد نسخة احتياطية) إن كانت أقدم من الكود
+_bootstrap(schema_version())                    # schema بلا شرطة سفلية: جزء من مفتاح التخزين المؤقت فعلًا
 theme.inject_css()
 if _v := _pwa_version():
     theme.pwa_head(_v)

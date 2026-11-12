@@ -235,8 +235,13 @@ def _invoice_form(cid, user):
             st.session_state["pi_nonce"] = int(st.session_state.get("pi_nonce", 0)) + 1
             st.rerun()
 
+    if cid is None:                                          # لا استعلام بدون مطعم محدد (require_client يضمنه؛ هذا حارس إضافي)
+        st.warning("هذه الصفحة تعمل على مطعم واحد. اختر المطعم من القائمة الجانبية.")
+        return
+    cid = int(cid)
     sup = query("SELECT id, name FROM suppliers WHERE client_id=? ORDER BY name", (cid,))
-    items = query("SELECT id, name, unit, last_price, track_expiry, barcode FROM items WHERE client_id=? AND is_semi=0 ORDER BY name", (cid,))
+    items = query("SELECT id, name, unit, last_price, track_expiry, barcode FROM items WHERE client_id=? AND is_semi=0 ORDER BY name",
+                  (cid,))
     codes = {n: b for n, b in zip(items["name"], items["barcode"]) if isinstance(b, str) and b}
     units = query("""SELECT u.item_id, u.unit_name, u.factor, u.is_purchase_default FROM item_units u JOIN items i ON i.id=u.item_id
                      WHERE i.client_id=? ORDER BY u.is_purchase_default DESC, u.id""", (cid,))

@@ -7,12 +7,23 @@
 """
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 from utils import config
+
+# قيم pandas/numpy (مثل الرقم الناتج من df["id"].iloc[0] أو من قائمة منسدلة مبنية على عمود) لا يعرفها sqlite3،
+# فيخزّنها كبايتات خام وتفشل المقارنة بصمت (WHERE client_id=? يرجع صفر صفوف بدل الخطأ). نسجّل محوّلات صريحة:
+for _t in (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64):
+    sqlite3.register_adapter(_t, int)
+for _t in (np.float16, np.float32, np.float64):
+    sqlite3.register_adapter(_t, float)
+sqlite3.register_adapter(np.bool_, bool)
+sqlite3.register_adapter(pd.Timestamp, lambda v: v.isoformat(sep=" "))
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = config.DB_PATH
@@ -646,8 +657,47 @@ def init_db() -> None:
             except Exception:
                 pass
         migrate(conn)
+        # بصمة إصدار البنية داخل ملف القاعدة نفسه: ensure_schema() يقارنها بإصدار الكود عند كل تحميل للصفحة
+        conn.execute(f"PRAGMA user_version = {int(schema_version())}")
+        conn.commit()
     finally:
         conn.close()
+
+
+_schema_lock = threading.Lock()
+
+
+def db_schema_version() -> int:
+    if not DB_PATH.exists():
+        return 0
+    conn = get_conn()
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def ensure_schema() -> bool:
+    """يضمن أن بنية القاعدة مطابقة لإصدار الكود قبل أي استعلام (فحص رخيص: قراءة user_version فقط).
+
+    إن كانت القاعدة أقدم (تحديث للكود بدون إعادة تشغيل، أو نقل قاعدة قديمة): نسخة احتياطية أولًا ثم الترحيل.
+    يرجع True إن تمّ ترحيل. القفل يمنع ترحيلين متزامنين من جلستين في نفس العملية (والترحيل نفسه آمن للتكرار).
+    """
+    if db_schema_version() >= schema_version():
+        return False
+    with _schema_lock:
+        if db_schema_version() >= schema_version():
+            return False
+        if DB_PATH.exists():
+            try:
+                path = backup_db(force=True)
+                log.info("نسخة احتياطية قبل ترحيل البنية: %s", path)
+            except Exception:
+                log.exception("تعذّرت النسخة الاحتياطية قبل الترحيل؛ أُلغي الترحيل")
+                raise
+        init_db()
+        log.info("رُحّلت بنية القاعدة إلى الإصدار %s", schema_version())
+        return True
 
 
 def backup_db(force: bool = False) -> Path | None:

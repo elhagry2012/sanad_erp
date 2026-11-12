@@ -308,8 +308,9 @@ def explode_requirements(cid, recipe_id, runs, warehouse_id=None) -> pd.DataFram
     walk(int(recipe_id), float(runs), frozenset())
     if not need:
         return pd.DataFrame()
-    items = query("""SELECT id, name, unit, qty_on_hand, avg_cost, last_price FROM items WHERE client_id=? AND id IN (%s)"""
-                  % ",".join(str(i) for i in need), (cid,))
+    ids = [int(i) for i in need]                         # need غير فارغ (فُحص أعلاه)؛ كل القيم كمعاملات لا كنص SQL
+    items = query(f"""SELECT id, name, unit, qty_on_hand, avg_cost, last_price FROM items
+                      WHERE client_id=? AND id IN ({",".join("?" * len(ids))})""", (cid, *ids))
     if warehouse_id:
         st = query("SELECT item_id, qty FROM warehouse_stock WHERE warehouse_id=?", (warehouse_id,)).set_index("item_id")["qty"]
     eq = item_unit_equivalents(cid)
